@@ -1,0 +1,15 @@
+# Runtime files — auto-generated, user-specific, or logs
+config.json
+skillhome.log
+watcher.log
+
+# Central skill repository — contains other people's skills, not part of this tool
+skills/
+
+# Metadata
+*.skillhome.json
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
