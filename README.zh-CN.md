@@ -1,13 +1,9 @@
 <p align="center">
-  <img src="assets/logo.svg" width="120" alt="SkillHome Logo"/>
-</p>
-
-<p align="center">
   <img src="https://capsule-render.vercel.app/api?type=waving&color=0:6C5CE7,50:00B894,100:0984E3&height=180&section=header&text=SkillHome&fontSize=70&fontColor=ffffff&animation=fadeIn&fontAlignY=38&desc=AI%20Agent%20%E7%BB%9F%E4%B8%80%20Skill%20%E7%AE%A1%E7%90%86&descSize=18&descAlignY=56" width="100%"/>
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · <a href="#快速开始">快速开始</a> · <a href="#命令">命令</a> · <a href="#工作原理">工作原理</a>
+  <a href="README.md">English</a> · <a href="#安装">安装</a> · <a href="#命令">命令</a> · <a href="#工作原理">工作原理</a>
 </p>
 
 <p align="center">
@@ -48,20 +44,39 @@ SkillHome 把所有 skill 文件移到一个中央仓库（`~/.skillhome/skills/
 
 每个 agent 看自己的 skill 目录，跟以前一模一样。文件是真实的、可读的，行为和本地目录完全一致——但它们都指向同一个源头。
 
-## 快速开始
+## 安装
 
-```powershell
-# 1. 初始化——自动扫描机器上所有 skill 目录
-skillhome init
+### 方式一：通过 skills.sh
 
-# 2. 同步——迁移 skill 到中央仓库，创建 junction
-skillhome sync
+把 SkillHome skill 安装到你的 agent——它包含安装说明，agent 可以照着做：
 
-# 3. 查看状态
-skillhome status
+```bash
+npx skills add Haaaiawd/skillhome -g
 ```
 
-就这些。没有后台进程，没有启动脚本，不需要管理员权限。
+然后对 agent 说"帮我设置 SkillHome"，它会下载 bin 脚本并运行初始化。
+
+### 方式二：从 GitHub Release 下载
+
+```powershell
+# 下载并解压
+mkdir -Force "$env:USERPROFILE\.skillhome"
+Invoke-WebRequest -Uri "https://github.com/Haaaiawd/skillhome/releases/latest/download/skillhome.zip" -OutFile "$env:USERPROFILE\.skillhome\skillhome.zip"
+Expand-Archive -Path "$env:USERPROFILE\.skillhome\skillhome.zip" -DestinationPath "$env:USERPROFILE\.skillhome" -Force
+Remove-Item "$env:USERPROFILE\.skillhome\skillhome.zip"
+
+# 初始化并同步
+& "$env:USERPROFILE\.skillhome\bin\skillhome.ps1" init
+& "$env:USERPROFILE\.skillhome\bin\skillhome.ps1" sync
+```
+
+### 方式三：git clone
+
+```powershell
+git clone https://github.com/Haaaiawd/skillhome.git "$env:USERPROFILE\.skillhome"
+& "$env:USERPROFILE\.skillhome\bin\skillhome.ps1" init
+& "$env:USERPROFILE\.skillhome\bin\skillhome.ps1" sync
+```
 
 > **前提：** PowerShell 7（`pwsh`）。脚本会自动探测路径。
 

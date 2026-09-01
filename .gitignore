@@ -3,8 +3,10 @@ config.json
 skillhome.log
 watcher.log
 
-# Central skill repository — contains other people's skills, not part of this tool
-skills/
+# Central skill repository — contains synced skills, not part of this tool
+# Exception: skills/skillhome/ is the skill definition, part of this repo
+skills/*
+!skills/skillhome/
 
 # Metadata
 *.skillhome.json

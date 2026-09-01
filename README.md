@@ -1,13 +1,9 @@
 <p align="center">
-  <img src="assets/logo.svg" width="120" alt="SkillHome Logo"/>
-</p>
-
-<p align="center">
   <img src="https://capsule-render.vercel.app/api?type=waving&color=0:6C5CE7,50:00B894,100:0984E3&height=180&section=header&text=SkillHome&fontSize=70&fontColor=ffffff&animation=fadeIn&fontAlignY=38&desc=Unified%20Skill%20Management%20for%20AI%20Agents&descSize=18&descAlignY=56" width="100%"/>
 </p>
 
 <p align="center">
-  <a href="README.zh-CN.md">中文文档</a> · <a href="#quick-start">Quick Start</a> · <a href="#commands">Commands</a> · <a href="#how-it-works">How It Works</a>
+  <a href="README.zh-CN.md">中文文档</a> · <a href="#installation">Installation</a> · <a href="#commands">Commands</a> · <a href="#how-it-works">How It Works</a>
 </p>
 
 <p align="center">
@@ -48,20 +44,39 @@ SkillHome moves all skill files into a single central repository (`~/.skillhome/
 
 Each agent sees its own skill directory as if nothing changed. The files are real, readable, and behave exactly like local directories. But they all point to one source of truth.
 
-## Quick Start
+## Installation
 
-```powershell
-# 1. Initialize — auto-discovers all skill directories on your machine
-skillhome init
+### Method 1: via skills.sh
 
-# 2. Sync — migrates skills to central repo, creates junctions
-skillhome sync
+Install the SkillHome skill to your agent — it includes setup instructions that the agent can follow:
 
-# 3. Check status
-skillhome status
+```bash
+npx skills add Haaaiawd/skillhome -g
 ```
 
-That's it. No background process, no startup script, no admin privileges.
+Then ask your agent "help me set up SkillHome" and it will download the bin scripts and run initialization.
+
+### Method 2: from GitHub Release
+
+```powershell
+# Download and extract
+mkdir -Force "$env:USERPROFILE\.skillhome"
+Invoke-WebRequest -Uri "https://github.com/Haaaiawd/skillhome/releases/latest/download/skillhome.zip" -OutFile "$env:USERPROFILE\.skillhome\skillhome.zip"
+Expand-Archive -Path "$env:USERPROFILE\.skillhome\skillhome.zip" -DestinationPath "$env:USERPROFILE\.skillhome" -Force
+Remove-Item "$env:USERPROFILE\.skillhome\skillhome.zip"
+
+# Initialize and sync
+& "$env:USERPROFILE\.skillhome\bin\skillhome.ps1" init
+& "$env:USERPROFILE\.skillhome\bin\skillhome.ps1" sync
+```
+
+### Method 3: git clone
+
+```powershell
+git clone https://github.com/Haaaiawd/skillhome.git "$env:USERPROFILE\.skillhome"
+& "$env:USERPROFILE\.skillhome\bin\skillhome.ps1" init
+& "$env:USERPROFILE\.skillhome\bin\skillhome.ps1" sync
+```
 
 > **Prerequisite:** PowerShell 7 (`pwsh`). The scripts auto-detect the path.
 
@@ -182,15 +197,16 @@ Edit `agentDirs` to add a new agent or remove one you don't want managed.
 │   ├── Discover-SkillDirs.ps1 # Auto-discovery
 │   ├── Sync-SkillHome.ps1     # Sync engine
 │   └── skillhome.ps1          # CLI entry point
-└── assets/
-    └── logo.svg
+└── skills/
+    └── skillhome/
+        └── SKILL.md           # Skill definition (for skills.sh)
 ```
 
 ## Portability
 
 Zero hardcoding. All paths derive from `$env:USERPROFILE`. To deploy on another machine:
 
-1. Copy `~/.skillhome/bin/` to the target machine
+1. Install via any method above
 2. Run `skillhome init`
 3. Run `skillhome sync`
 
