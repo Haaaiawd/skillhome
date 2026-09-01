@@ -42,6 +42,7 @@ git clone https://github.com/Haaaiawd/skillhome.git "$env:USERPROFILE\.skillhome
 
 - **config.json 不存在** → 跑 `skillhome init`，自检索会扫描用户目录发现所有 skill 存放地并生成配置
 - **用户装了新 agent 或新 skill 目录** → 跑 `skillhome discover` 更新 config.json，再 `skillhome sync`
+- **用户想从 skills.sh 安装新 skill** → 跑 `skillhome add <source>`（包装 npx skills add，安装后自动 sync 到中央 + 全局共享）
 - **有残留真实目录（Reals > 0）** → 跑 `skillhome sync`，迁移到中央并替换为 junction
 - **用户想在某个 agent 里用另一个 agent 的 skill** → 跑 `skillhome link <skill> <agent>`
 - **用户想从某个 agent 移除一个 skill** → 跑 `skillhome unlink <skill> <agent>`

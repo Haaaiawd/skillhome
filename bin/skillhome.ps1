@@ -313,6 +313,7 @@ function Show-Help {
     skillhome link <skill> <agent>    把 skill link 到 agent 目录
     skillhome unlink <skill> <agent>  从 agent 目录移除 junction
     skillhome global <skill> [on|off] 设置/取消全局共享（sync 时自动扩散到所有 agent）
+    skillhome add <source> [options]  包装 npx skills add，安装后自动 sync 到中央
     skillhome config            查看当前配置
     skillhome help              显示此帮助
 
@@ -331,6 +332,37 @@ function Show-Help {
 }
 
 # ============================================================
+# add — 包装 npx skills add，安装后自动 sync 到中央
+# ============================================================
+function Invoke-SkillsAdd {
+  if ($Args.Count -eq 0) {
+    Write-Host "用法: skillhome add <source> [npx skills add 选项]" -ForegroundColor Red
+    Write-Host "示例:" -ForegroundColor Gray
+    Write-Host "  skillhome add vercel-labs/agent-skills -g" -ForegroundColor Gray
+    Write-Host "  skillhome add owner/repo --skill frontend-design" -ForegroundColor Gray
+    Write-Host "  skillhome add owner/repo -a claude-code -a codex" -ForegroundColor Gray
+    return
+  }
+  # 检查 npx 可用
+  $npx = Get-Command npx -ErrorAction SilentlyContinue
+  if (-not $npx) {
+    Write-Host "找不到 npx，请先安装 Node.js" -ForegroundColor Red
+    return
+  }
+  Write-Host "运行: npx skills add $($Args -join ' ')" -ForegroundColor Cyan
+  & npx skills add @Args
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host "npx skills add 失败 (exit $LASTEXITCODE)" -ForegroundColor Red
+    return
+  }
+  Write-Host ""
+  Write-Host "sync 到 SkillHome 中央仓库..." -ForegroundColor Cyan
+  Invoke-Sync
+  Write-Host ""
+  Write-Host "完成。新 skill 已纳入中央仓库，全局共享已生效。" -ForegroundColor Green
+}
+
+# ============================================================
 # 主分发
 # ============================================================
 switch ($Command.ToLower()) {
@@ -342,6 +374,7 @@ switch ($Command.ToLower()) {
   'link'     { Invoke-Link -SkillName $Args[0] -AgentName $Args[1] }
   'unlink'   { Invoke-Unlink -SkillName $Args[0] -AgentName $Args[1] }
   'global'   { Set-Global -SkillName $Args[0] -Action $Args[1] }
+  'add'      { Invoke-SkillsAdd -Args $Args }
   'config'   { Show-Config }
   'help'     { Show-Help }
   default    { Write-Host "未知命令: $Command" -ForegroundColor Red; Show-Help }

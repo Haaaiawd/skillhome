@@ -92,6 +92,7 @@ git clone https://github.com/Haaaiawd/skillhome.git "$env:USERPROFILE\.skillhome
 | `skillhome link <skill> <agent>` | 把某个 skill 暴露给指定 agent |
 | `skillhome unlink <skill> <agent>` | 从指定 agent 移除某个 skill |
 | `skillhome global <skill> [on\|off]` | 设置/取消全局共享（sync 时自动扩散到所有 agent） |
+| `skillhome add <source> [options]` | 包装 `npx skills add`，安装后自动 sync 到中央 |
 | `skillhome config` | 查看当前配置 |
 | `skillhome help` | 显示帮助 |
 
