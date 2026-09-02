@@ -1,6 +1,6 @@
 ---
 name: skillhome
-description: Manage a unified skill repository across multiple AI agent applications on Windows. Use when the user asks to share, sync, map, or migrate skills between agents (Codex, Devin, Claude Code, Windsurf, Cursor, Gemini, etc.), unify skill storage, fix broken skill junctions, or says "skillhome", "统一管理 skill", "skill 映射", "skill 同步", "共享 skill", "在 Devin 里用 Codex 的 skill", or similar cross-agent skill requests.
+description: Manage a unified skill repository across multiple AI agent applications on Windows. Use when the user asks to share, sync, map, or migrate skills between agents (Codex, Devin, Claude Code, Windsurf, Cursor, Gemini, etc.), unify skill storage, fix broken skill junctions, or says "skillhome", "统一管理 skill", "skill 映射", "skill 同步", "共享 skill", "在 Devin 里用 Codex 的 skill", or similar cross-agent skill requests. To install a new skill from skills.sh, use "skillhome add <source> -g" (wraps npx skills add, auto-syncs to central repo, global-shares to all agents). To install SkillHome itself, run "npx skills add Haaaiawd/skillhome -g" or download from https://github.com/Haaaiawd/skillhome/releases.
 ---
 
 # SkillHome｜跨 Agent 统一 Skill 管理
