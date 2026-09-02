@@ -97,7 +97,12 @@ function Remove-JunctionSafe {
   $item = Get-Item -Path $Path -Force -ErrorAction SilentlyContinue
   if (-not $item) { return }
   if ($item.LinkType -in @('Junction','SymbolicLink')) {
-    cmd /c rmdir "$Path" 2>&1 | Out-Null
+    if ($SH_IsWindows) {
+      cmd /c rmdir "$Path" 2>&1 | Out-Null
+    } else {
+      # Unix: symlink 删除用 Remove-Item 即可（不会删目标）
+      Remove-Item -Path $Path -Force
+    }
   } else {
     Remove-Item -Path $Path -Recurse -Force
   }
@@ -105,10 +110,16 @@ function Remove-JunctionSafe {
 
 function New-JunctionSafe {
   param([string]$Link, [string]$Target)
-  if (-not (Test-Path $Target)) { Write-Log "junction 目标不存在: $Target" 'ERROR'; return $false }
+  if (-not (Test-Path $Target)) { Write-Log "链接目标不存在: $Target" 'ERROR'; return $false }
   if (Test-Path $Link) { Remove-JunctionSafe -Path $Link }
-  cmd /c mklink /J "$Link" "$Target" 2>&1 | Out-Null
-  if (Test-Path $Link) { return $true } else { Write-Log "创建 junction 失败: $Link" 'ERROR'; return $false }
+  if ($SH_IsWindows) {
+    # Windows: NTFS junction（不需要管理员权限）
+    cmd /c mklink /J "$Link" "$Target" 2>&1 | Out-Null
+  } else {
+    # Linux/macOS: symlink（可能需要对父目录的写权限）
+    New-Item -ItemType SymbolicLink -Path $Link -Target $Target -Force 2>&1 | Out-Null
+  }
+  if (Test-Path $Link) { return $true } else { Write-Log "创建链接失败: $Link" 'ERROR'; return $false }
 }
 
 function Read-Meta {

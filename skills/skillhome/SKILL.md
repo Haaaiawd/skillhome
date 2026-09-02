@@ -109,8 +109,9 @@ skillhome global some-skill off     # 取消某个 skill 的全局共享
 - 用户只想查看信息（status/list/config）→ 给出信息即完成，不主动触发 sync
 - config.json 不存在且用户不想初始化 → 不要强行 init，先说明情况让用户决定
 
-## 平台限制
+## 平台支持
 
-- junction 是 Windows NTFS 特性，跨平台需改用 symlink
-- 需要 PowerShell 7（`pwsh`），脚本会自动探测路径
-- 不需要管理员权限
+- **Windows**：使用 NTFS junction，不需要管理员权限
+- **Linux/macOS**：使用 symlink，需要对 skill 目录的写权限
+- 需要 PowerShell 7（`pwsh`），脚本会自动检测平台并选择正确的链接方式
+- 路径分隔符和发现模式按平台自动切换

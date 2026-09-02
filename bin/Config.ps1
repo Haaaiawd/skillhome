@@ -2,59 +2,96 @@
 .SYNOPSIS
   SkillHome 共享配置模块 — 被 Sync/skillhome/Discover 脚本 dot-source 引用。
   所有路径动态推导，零硬编码，可在任何用户的电脑上运行。
+  跨平台支持：Windows (NTFS junction) / Linux & macOS (symlink)。
 #>
+
+# ============================================================
+# 平台检测
+# ============================================================
+# 注意：PowerShell 7 内置 $IsWindows 是只读变量，用 $SH_IsWindows 避免冲突
+$SH_IsWindows = $PSVersionTable.Platform -ne 'Unix'
+if ($SH_IsWindows) {
+  $UserProfile = $env:USERPROFILE
+} else {
+  $UserProfile = $env:HOME
+}
 
 # ============================================================
 # 路径推导（零硬编码）
 # ============================================================
-$UserProfile     = $env:USERPROFILE
 $HomeRoot        = Join-Path $UserProfile '.skillhome'
 $CentralSkills   = Join-Path $HomeRoot 'skills'
 $BinDir          = Join-Path $HomeRoot 'bin'
 $ConfigPath      = Join-Path $HomeRoot 'config.json'
 $LogFile         = Join-Path $HomeRoot 'skillhome.log'
 $PwshExe         = if (Get-Command pwsh -ErrorAction SilentlyContinue) { (Get-Command pwsh).Source }
-                   elseif (Test-Path 'C:\Program Files\PowerShell\7\pwsh.exe') { 'C:\Program Files\PowerShell\7\pwsh.exe' }
-                   else { 'powershell.exe' }
+                   elseif ($SH_IsWindows -and (Test-Path 'C:\Program Files\PowerShell\7\pwsh.exe')) { 'C:\Program Files\PowerShell\7\pwsh.exe' }
+                   else { 'pwsh' }
 
 # ============================================================
 # 默认配置
 # ============================================================
 # 已知的 agent skill 目录模式（相对于用户目录）
-# discover 时按这些模式探测；用户目录下匹配到的就纳入
-$KnownSkillDirPatterns = @(
-  '.devin\skills',
-  '.agents\skills',
-  '.claude\skills',
-  '.codeium\windsurf\skills',
-  '.codex\skills',
-  '.cursor\skills-cursor',
-  '.cursor\skills',
-  '.qoderworkcn\skills',
-  '.qoder\skills',
-  '.gemini\antigravity\skills',
-  '.gemini\skills',
-  '.cc-switch\skills',
-  '.config\devin\skills',
-  '.roo\skills',
-  '.kilocode\skills',
-  '.kiro\skills',
-  '.trae\skills',
-  '.lingma\skills',
-  '.qwen\skills',
-  '.copilot\skills',
-  '.continue\skills',
-  '.cline\skills',
-  '.antigravity\skills',
-  '.marscode\skills',
-  '.cagent\skills',
-  '.bito\skills',
-  '.comate\skills',
-  '.codeverse\skills',
-  '.continuum\skills',
-  '.kimi-code\skills',
-  '.trae-aicc\skills'
-)
+# Windows 用反斜杠，Unix 用正斜杠
+if ($SH_IsWindows) {
+  $KnownSkillDirPatterns = @(
+    '.devin\skills',
+    '.agents\skills',
+    '.claude\skills',
+    '.codeium\windsurf\skills',
+    '.codex\skills',
+    '.cursor\skills-cursor',
+    '.cursor\skills',
+    '.qoderworkcn\skills',
+    '.qoder\skills',
+    '.gemini\antigravity\skills',
+    '.gemini\skills',
+    '.cc-switch\skills',
+    '.config\devin\skills',
+    '.roo\skills',
+    '.kilocode\skills',
+    '.kiro\skills',
+    '.trae\skills',
+    '.lingma\skills',
+    '.qwen\skills',
+    '.copilot\skills',
+    '.continue\skills',
+    '.cline\skills',
+    '.antigravity\skills',
+    '.marscode\skills',
+    '.cagent\skills',
+    '.bito\skills',
+    '.comate\skills',
+    '.codeverse\skills',
+    '.continuum\skills',
+    '.kimi-code\skills',
+    '.trae-aicc\skills'
+  )
+} else {
+  # Unix 路径模式 — 大部分 agent 在 ~ 下用相同的 .dirname 结构
+  $KnownSkillDirPatterns = @(
+    '.devin/skills',
+    '.agents/skills',
+    '.claude/skills',
+    '.codex/skills',
+    '.cursor/skills',
+    '.gemini/skills',
+    '.config/claude/skills',
+    '.config/codex/skills',
+    '.config/devin/skills',
+    '.continue/skills',
+    '.cline/skills',
+    '.roo/skills',
+    '.kilocode/skills',
+    '.kiro/skills',
+    '.trae/skills',
+    '.lingma/skills',
+    '.qwen/skills',
+    '.copilot/skills',
+    '.local/share/claude/skills',
+    '.local/share/codex/skills'
+  )
+}
 
 $DefaultSkipNames = @('.system', '.git', '.temp', '_shared')
 $DefaultSimilarityThreshold = 0.95

@@ -9,7 +9,8 @@
 <p align="center">
   <img src="https://img.shields.io/badge/PowerShell-7+-5391FE?style=for-the-badge&logo=powershell&logoColor=white"/>
   <img src="https://img.shields.io/badge/Windows-NTFS-0078D6?style=for-the-badge&logo=windows&logoColor=white"/>
-  <img src="https://img.shields.io/badge/Platform-Cross--Agent-6C5CE7?style=for-the-badge"/>
+  <img src="https://img.shields.io/badge/Linux-symlink-FCC624?style=for-the-badge&logo=linux&logoColor=black"/>
+  <img src="https://img.shields.io/badge/macOS-symlink-000000?style=for-the-badge&logo=apple&logoColor=white"/>
   <img src="https://img.shields.io/badge/License-MIT-00B894?style=for-the-badge"/>
 </p>
 
@@ -212,9 +213,18 @@ Agent B 有 "docx"（Gemini 的实现）
 
 不需要管理员权限，没有后台服务，没有启动脚本。
 
+## 平台支持
+
+| 平台 | 链接类型 | 需要管理员权限 |
+|---|---|---|
+| Windows | NTFS junction | 否 |
+| Linux | symlink | 否（对 skill 目录有写权限即可） |
+| macOS | symlink | 否（对 skill 目录有写权限即可） |
+
+SkillHome 通过 `$PSVersionTable.Platform` 自动检测平台，使用对应的链接方式。发现模式按平台区分——Windows 探测 `~\.codex\skills`，Unix 探测 `~/.codex/skills` 和 `~/.config/codex/skills`。
+
 ## 限制
 
-- **仅 Windows** — 使用 NTFS junction。Linux/macOS 需改用 symlink。
 - **需要 PowerShell 7**（`pwsh`）。如果在 PATH 中会自动探测。
 - **无守护进程** — 同步是手动触发的。skill 变化是低频事件，后台 watcher 只增加复杂度不增加价值。
 

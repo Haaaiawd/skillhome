@@ -9,7 +9,8 @@
 <p align="center">
   <img src="https://img.shields.io/badge/PowerShell-7+-5391FE?style=for-the-badge&logo=powershell&logoColor=white"/>
   <img src="https://img.shields.io/badge/Windows-NTFS-0078D6?style=for-the-badge&logo=windows&logoColor=white"/>
-  <img src="https://img.shields.io/badge/Platform-Cross--Agent-6C5CE7?style=for-the-badge"/>
+  <img src="https://img.shields.io/badge/Linux-symlink-FCC624?style=for-the-badge&logo=linux&logoColor=black"/>
+  <img src="https://img.shields.io/badge/macOS-symlink-000000?style=for-the-badge&logo=apple&logoColor=white"/>
   <img src="https://img.shields.io/badge/License-MIT-00B894?style=for-the-badge"/>
 </p>
 
@@ -213,9 +214,18 @@ Zero hardcoding. All paths derive from `$env:USERPROFILE`. To deploy on another 
 
 No admin privileges required. No background services. No startup scripts.
 
+## Platform Support
+
+| Platform | Link Type | Admin Required |
+|---|---|---|
+| Windows | NTFS junction | No |
+| Linux | symlink | No (write access to skill dirs) |
+| macOS | symlink | No (write access to skill dirs) |
+
+SkillHome auto-detects the platform via `$PSVersionTable.Platform` and uses the appropriate link type. Discovery patterns are platform-specific — Windows probes `~\.codex\skills`, Unix probes `~/.codex/skills` and `~/.config/codex/skills`.
+
 ## Limitations
 
-- **Windows only** — uses NTFS junctions. On Linux/macOS, would need symlink adaptation.
 - **PowerShell 7** required (`pwsh`). Auto-detected if on PATH.
 - **No daemon** — sync is manual by design. Skills change infrequently; a background watcher adds complexity without value.
 
