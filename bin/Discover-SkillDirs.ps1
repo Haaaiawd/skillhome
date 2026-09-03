@@ -3,16 +3,19 @@
   SkillHome 自检索 — 扫描用户目录，自动发现所有 skill 存放地，写入 config.json。
 
 .DESCRIPTION
-  识别特征（满足任一即认为是 skill 目录）：
-  1. 目录名包含 "skill" 且目录下有子目录含 SKILL.md
-  2. 目录名包含 "skill" 且目录下有子目录含 .skill-metadata.yaml
-  3. 目录名包含 "skill" 且目录自身有 SKILL.md
+  特征识别（不依赖目录名，看目录结构）：
+  一个目录是 skill 仓库，当且仅当：
+  1. 它有 ≥2 个子目录，每个子目录含 SKILL.md 或 .skill-metadata.yaml
+     （≥2 避免单个随机 SKILL.md 造成的误报）
+  2. 或它有 ≥1 个这样的子目录，且目录名含 "skill"（宽松匹配，辅助确认）
 
   扫描策略：
-  - 第一阶段：快速探测已知模式（~30 个常见路径），命中即纳入
-  - 第二阶段：深度扫描用户目录下所有 . 开头的目录（深度 3），发现未知 skill 目录
+  - 第一阶段：快速探测已知路径模式（~30 个），命中且通过特征验证即纳入
+  - 第二阶段：深度扫描用户目录下所有 . 开头的目录（深度 3），
+    不看目录名，纯靠结构特征识别 skill 仓库
 
-  找到的目录写入 config.json，Sync/Watcher 从中读取。
+  这样能发现 Open Cloud、Hermes 等未知 agent 的 skill 目录，
+  即使它们不叫 "skills" 也能被识别。
 
 .PARAMETER ScanDepth
   深度扫描的递归深度，默认 3。
@@ -38,19 +41,31 @@ $ErrorActionPreference = 'Continue'
 Initialize-SkillHomeDirs
 
 # ============================================================
-# 工具函数
+# 特征识别函数
 # ============================================================
-function Test-IsSkillDir {
+
+# 计算一个目录下有多少个 skill 子目录（含 SKILL.md 或 .skill-metadata.yaml）
+function Get-SkillChildCount {
   param([string]$Path)
-  if (-not (Test-Path $Path)) { return $false }
-  # 子目录有 SKILL.md
+  if (-not (Test-Path $Path)) { return 0 }
+  $count = 0
   $children = Get-ChildItem -Path $Path -Directory -Force -ErrorAction SilentlyContinue
   foreach ($child in $children) {
-    if (Test-Path (Join-Path $child.FullName 'SKILL.md')) { return $true }
-    if (Test-Path (Join-Path $child.FullName '.skill-metadata.yaml')) { return $true }
+    if ($SkipNames -contains $child.Name) { continue }
+    if (Test-Path (Join-Path $child.FullName 'SKILL.md')) { $count++; continue }
+    if (Test-Path (Join-Path $child.FullName '.skill-metadata.yaml')) { $count++; continue }
   }
-  # 自身有 SKILL.md
-  if (Test-Path (Join-Path $Path 'SKILL.md')) { return $true }
+  return $count
+}
+
+# 特征识别：一个目录是否是 skill 仓库
+# 规则：≥2 个 skill 子目录 → 确认；1 个 + 目录名含 skill → 也确认
+function Test-IsSkillRepo {
+  param([string]$Path)
+  if (-not (Test-Path $Path)) { return $false }
+  $skillCount = Get-SkillChildCount -Path $Path
+  if ($skillCount -ge 2) { return $true }
+  if ($skillCount -ge 1 -and (Split-Path $Path -Leaf) -match 'skill') { return $true }
   return $false
 }
 
@@ -74,20 +89,21 @@ function Get-AgentName {
   # .devin\skills => devin
   # .cursor\skills-cursor => cursor
   # .gemini\antigravity\skills => gemini
-  # .codeium\windsurf\skills => windsurf
-  # .config\devin\skills => config-devin
+  # .hermes\capabilities => hermes
+  # .opencloud\agent-skills => opencloud
   $rel = $Path.Substring($UserProfile.Length).TrimStart('\','/')
   $parts = $rel -split '[\\/]'
-  # 取第一个非 skills 的部分作为 agent 名
+  # 取非 skill 类的词作为 agent 名
   $nameParts = @()
   foreach ($p in $parts) {
-    if ($p -match '^skill') { continue }
+    if ($p -match '^skill') { continue }     # skills, skills-cursor
+    if ($p -match 'skill$') { continue }      # agent-skills
+    if ($p -eq 'capabilities') { continue }   # hermes 用这个名字
+    if ($p -eq 'agents') { continue }         # .agents/skills
     $nameParts += $p
   }
   if ($nameParts.Count -eq 0) { return 'unknown' }
-  # 如果有多个部分（如 .config\devin），用 - 连接
   $name = ($nameParts -join '-')
-  # 去掉前导点
   $name = $name -replace '^\.', ''
   return $name
 }
@@ -97,34 +113,33 @@ function Get-AgentName {
 # ============================================================
 Write-Host "=== SkillHome 自检索 ===" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "[1/2] 探测已知 skill 目录模式..." -ForegroundColor Gray
+Write-Host "[1/2] 探测已知路径模式..." -ForegroundColor Gray
 
 $found = [ordered]@{}
 
 foreach ($pattern in $KnownSkillDirPatterns) {
   $path = Join-Path $UserProfile $pattern
-  if (Test-IsSkillDir -Path $path) {
+  if (Test-IsSkillRepo -Path $path) {
     $agentName = Get-AgentName -Path $path
-    # 处理重名（如 .cursor\skills 和 .cursor\skills-cursor 都存在）
     if ($found.Contains($agentName)) {
-      # 用完整路径区分
       $rel = $path.Substring($UserProfile.Length).TrimStart('\','/').Replace('\','-').Replace('/','-')
       $agentName = $rel -replace '^\.', '' -replace '-skills$','' -replace 'skills-',''
     }
     $info = Get-SkillDirInfo -Path $path
     $found[$agentName] = $path
+    $skillCount = Get-SkillChildCount -Path $path
     $status = if ($info.Real -gt 0) { "real=$($info.Real)" } elseif ($info.Junction -gt 0) { "junction=$($info.Junction)" } else { "empty" }
-    Write-Host "  [OK] $agentName => $path ($status)" -ForegroundColor Green
+    Write-Host "  [OK] $agentName => $path ($status, $skillCount skills)" -ForegroundColor Green
   }
 }
 
 # ============================================================
-# 阶段 2：深度扫描发现未知目录
+# 阶段 2：深度扫描——纯特征识别，不依赖目录名
 # ============================================================
 Write-Host ""
-Write-Host "[2/2] 深度扫描用户目录（depth=$ScanDepth）..." -ForegroundColor Gray
+Write-Host "[2/2] 深度扫描（特征识别，不依赖目录名）..." -ForegroundColor Gray
 
-# 排除的顶级目录（性能）
+# 排除的顶级目录（性能 + 安全）
 $ExcludeTop = @(
   '.skillhome', '.cache', '.npm', '.cargo', '.rustup', '.conda', '.anaconda',
   '.m2', '.gradle', '.docker', '.ollama', '.ssh', '.gnupg', '.kube',
@@ -142,46 +157,45 @@ $ExcludeTop = @(
   '.vscode', '.windsurf', '.antigravity'
 )
 
-# 深度扫描时要排除的路径片段（出现在路径中就跳过）
+# 深度扫描时要排除的路径片段
 $ExcludePathPatterns = @(
-  'extensions', 'builtin', '\.tmp', '\.github', 'node_modules', '\.git\\',
-  'computer-use'  # qoderworkcn 的嵌套 computer-use skills 是内部依赖
+  'extensions', 'builtin', '\.tmp', '\.github', 'node_modules', '\.git[\\/]',
+  'computer-use', 'vendor_imports', 'curated'
 )
 
-# 阶段 1 已找到的目录及其子目录都要排除（避免在已知 skill 目录里再找 skill 目录）
+# 阶段 1 已找到的目录及其子目录都要排除
 $foundPaths = @()
 foreach ($k in $found.Keys) { $foundPaths += $found[$k] }
 
+# 扫描所有 . 开头的目录（不再要求名字含 skill）
 $topDirs = Get-ChildItem -Path $UserProfile -Directory -Force -ErrorAction SilentlyContinue |
-  Where-Object { $ExcludeTop -notcontains $_.Name -and ($_.Name.StartsWith('.') -or $_.Name -match 'skill') }
+  Where-Object { $ExcludeTop -notcontains $_.Name -and $_.Name.StartsWith('.') }
 
 $newCount = 0
 foreach ($top in $topDirs) {
   try {
+    # 递归找所有子目录，不限名字
     $candidates = Get-ChildItem -Path $top.FullName -Directory -Recurse -Depth $ScanDepth -Force -ErrorAction SilentlyContinue |
       Where-Object {
-        $_.Name -match 'skill' -and
         $_.FullName -notlike "$HomeRoot*" -and
-        $_.FullName -notmatch 'node_modules|\.git\\'
+        $_.FullName -notmatch 'node_modules|\.git[\\/]'
       }
-    # 更严格的过滤
-    $filtered = @()
     foreach ($c in $candidates) {
-      $skip = $false
       # 排除路径片段
+      $skip = $false
       foreach ($pat in $ExcludePathPatterns) {
         if ($c.FullName -match $pat) { $skip = $true; break }
       }
       if ($skip) { continue }
       # 排除已找到目录的子目录
       foreach ($fp in $foundPaths) {
-        if ($c.FullName -like "$fp\*") { $skip = $true; break }
+        if ($c.FullName -like "$fp*" -or $fp -like "$($c.FullName)*") { $skip = $true; break }
       }
       if ($skip) { continue }
-      $filtered += $c
-    }
-    foreach ($c in $filtered) {
-      if (-not (Test-IsSkillDir -Path $c.FullName)) { continue }
+
+      # 纯特征识别：不关心目录叫什么，只看结构
+      if (-not (Test-IsSkillRepo -Path $c.FullName)) { continue }
+
       # 已在 found 中？
       $alreadyFound = $false
       foreach ($k in $found.Keys) { if ($found[$k] -eq $c.FullName) { $alreadyFound = $true; break } }
@@ -189,17 +203,17 @@ foreach ($top in $topDirs) {
 
       $agentName = Get-AgentName -Path $c.FullName
       if ($found.Contains($agentName)) {
-        # 重名处理：加路径后缀
         $suffix = ($c.FullName.Substring($UserProfile.Length) -split '[\\/]')[-2]
         $agentName = "${agentName}-${suffix}"
       }
-      if ($found.Contains($agentName)) { continue }  # 还是重名，跳过
+      if ($found.Contains($agentName)) { continue }
 
       $info = Get-SkillDirInfo -Path $c.FullName
+      $skillCount = Get-SkillChildCount -Path $c.FullName
       $found[$agentName] = $c.FullName
       $newCount++
       $status = if ($info.Real -gt 0) { "real=$($info.Real)" } elseif ($info.Junction -gt 0) { "junction=$($info.Junction)" } else { "empty" }
-      Write-Host "  [NEW] $agentName => $($c.FullName) ($status)" -ForegroundColor Yellow
+      Write-Host "  [NEW] $agentName => $($c.FullName) ($status, $skillCount skills)" -ForegroundColor Yellow
     }
   } catch {}
 }
@@ -214,7 +228,8 @@ if ($Interactive) {
   Write-Host "确认纳入的目录:" -ForegroundColor Cyan
   foreach ($k in $found.Keys) {
     $info = Get-SkillDirInfo -Path $found[$k]
-    $prompt = "纳入 $k => $($found[$k])? (real=$($info.Real), junction=$($info.Junction)) [Y/n]"
+    $skillCount = Get-SkillChildCount -Path $found[$k]
+    $prompt = "纳入 $k => $($found[$k])? ($skillCount skills, real=$($info.Real), junction=$($info.Junction)) [Y/n]"
     $response = Read-Host $prompt
     if ($response -ne 'n' -and $response -ne 'N') {
       $finalDirs[$k] = $found[$k]
