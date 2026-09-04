@@ -2,6 +2,7 @@
 config.json
 skillhome.log
 watcher.log
+backups/
 
 # Central skill repository — contains synced skills, not part of this tool
 # Exception: skills/skillhome/ is the skill definition, part of this repo

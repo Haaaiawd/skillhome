@@ -7,11 +7,14 @@ Linux/macOS: symlink
 依赖：Python 3.8+，零第三方包。
 """
 import os
+import re
 import sys
 import json
 import shutil
 import hashlib
 import platform
+import zipfile
+import tempfile
 import subprocess
 from pathlib import Path
 from datetime import datetime
@@ -1012,27 +1015,155 @@ def cmd_global(skill_name, action):
 
 
 # ============================================================
-# add — 包装 npx skills add
+# add — 安装 skill 到中央仓库
+#   - 本地 zip / 目录：直接装入中央仓库（不依赖 npx，绕过上游编码校验）
+#   - 远程源（owner/repo、URL）：包装 npx skills add
 # ============================================================
+def _decode_text(raw):
+    """尝试多种编码解码，返回第一个成功的。覆盖中文 skill 常见的 GBK/GB18030 场景。"""
+    for enc in ("utf-8-sig", "utf-8", "gb18030", "gbk", "utf-16", "utf-16-le", "utf-16-be", "latin-1"):
+        try:
+            return raw.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def _find_skill_root(start):
+    """在 start 下定位含 SKILL.md / .skill-metadata.yaml 的目录，优先顶层。"""
+    markers = ("SKILL.md", ".skill-metadata.yaml")
+    if any((start / m).is_file() for m in markers):
+        return start
+    # 常见 zip 结构：name/SKILL.md
+    for child in sorted(start.iterdir()):
+        if child.is_dir() and any((child / m).is_file() for m in markers):
+            return child
+    # 再深一层兜底
+    for child in sorted(start.iterdir()):
+        if not child.is_dir():
+            continue
+        for grand in sorted(child.iterdir()):
+            if grand.is_dir() and any((grand / m).is_file() for m in markers):
+                return grand
+    return None
+
+
+def _parse_skill_name(skill_root):
+    """从 SKILL.md frontmatter 读 name；读不到就用目录名。"""
+    sm = skill_root / "SKILL.md"
+    if sm.is_file():
+        text = _decode_text(sm.read_bytes())
+        if text.lstrip().startswith("---"):
+            body = text.lstrip()
+            end = body.find("---", 3)
+            if end != -1:
+                fm = body[3:end]
+                for line in fm.splitlines():
+                    m = re.match(r'^name:\s*(.+?)\s*$', line.strip())
+                    if m:
+                        return m.group(1).strip().strip('"\'')
+    return skill_root.name
+
+
+def install_local_to_central(src, is_zip):
+    """把本地 zip 或目录直接装进中央仓库，返回 skill name（失败返回 None）。"""
+    tmp = None
+    if is_zip:
+        tmp = Path(tempfile.mkdtemp(prefix="skillhome_add_"))
+        try:
+            with zipfile.ZipFile(src) as z:
+                z.extractall(tmp)
+        except zipfile.BadZipFile:
+            print(f"无法解压（坏 zip）：{src}")
+            shutil.rmtree(tmp, ignore_errors=True)
+            return None
+        scan_root = tmp
+    else:
+        scan_root = src
+
+    skill_root = _find_skill_root(scan_root)
+    if not skill_root:
+        print("未找到 SKILL.md / .skill-metadata.yaml，不是有效的 skill 包")
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+        return None
+
+    name = _parse_skill_name(skill_root)
+    safe = re.sub(r'[\\/:*?"<>|\s]+', "_", name).strip("_") or "unnamed_skill"
+    dest = CENTRAL_SKILLS / safe
+
+    if dest.exists():
+        bak_dir = HOME_ROOT / "backups"
+        bak_dir.mkdir(parents=True, exist_ok=True)
+        bak = bak_dir / (dest.name + ".bak." + datetime.now().strftime("%Y%m%d%H%M%S"))
+        shutil.move(str(dest), str(bak))
+        print(f"已存在 {safe}，旧版本备份到 {bak}")
+
+    shutil.copytree(str(skill_root), str(dest))
+
+    # SKILL.md 非 UTF-8 时统一转码，避免下游 agent 读取乱码
+    sm = dest / "SKILL.md"
+    if sm.is_file():
+        raw = sm.read_bytes()
+        try:
+            raw.decode("utf-8")
+        except UnicodeDecodeError:
+            sm.write_text(_decode_text(raw), encoding="utf-8")
+            print("SKILL.md 编码已转换为 UTF-8")
+
+    write_meta(dest, {
+        "name": safe,
+        "sources": [str(src)],
+        "merged": False,
+        "global": True,
+        "created_at": datetime.now().isoformat(),
+        "updated_at": datetime.now().isoformat(),
+    })
+
+    if tmp:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return safe
+
+
 def cmd_add(args):
     if not args:
-        print("用法: skillhome add <source> [npx skills add 选项]")
+        print("用法: skillhome add <source> [options]")
         print("示例:")
-        print("  skillhome add vercel-labs/agent-skills -g")
+        print("  skillhome add ./my-skill               本地目录直接装入中央仓库")
+        print("  skillhome add ./pack.zip -g            本地 zip 直接装入中央仓库")
+        print("  skillhome add vercel-labs/agent-skills -g   远程源走 npx skills add")
         print("  skillhome add owner/repo --skill frontend-design")
-        print("  skillhome add owner/repo -a claude-code -a codex")
         return
-    # 检查 npx
+
+    source = args[0]
+    src_path = Path(source).expanduser()
+
+    is_local_zip = src_path.is_file() and source.lower().endswith(".zip")
+    is_local_dir = src_path.is_dir()
+
+    if is_local_zip or is_local_dir:
+        print(f"本地{'zip' if is_local_zip else '目录'}: {src_path}")
+        name = install_local_to_central(src_path, is_zip=is_local_zip)
+        if not name:
+            return
+        print(f"已装入中央仓库: {name}（默认全局共享）")
+        print("\nsync 到各 agent ...")
+        cmd_sync(incremental=True)
+        print("\n完成。")
+        return
+
+    # 远程源：包装 npx skills add（用 which 解析到的全路径，Windows 上是 npx.cmd）
     npx = shutil.which("npx")
     if not npx:
         print("找不到 npx，请先安装 Node.js")
+        print("提示：本地 zip/目录可直接装入中央仓库，无需 npx")
         return
     print(f"运行: npx skills add {' '.join(args)}")
-    result = subprocess.run(["npx", "skills", "add"] + args)
+    result = subprocess.run([npx, "skills", "add"] + args)
     if result.returncode != 0:
         print(f"npx skills add 失败 (exit {result.returncode})")
         return
-    print("\nsync 到 SkillHome 中央仓库...")
+    print("\nsync 到 SkillHome 中央仓库 ...")
     cmd_sync(incremental=True)
     print("\n完成。新 skill 已纳入中央仓库，全局共享已生效。")
 
@@ -1073,7 +1204,7 @@ def cmd_help():
     skillhome link <skill> <agent>    把 skill 链接到 agent 目录
     skillhome unlink <skill> <agent>  从 agent 目录移除链接
     skillhome global <skill> [on|off] 设置/取消全局共享
-    skillhome add <source> [options]  包装 npx skills add，安装后自动 sync
+    skillhome add <source> [options]  安装 skill：本地 zip/目录直接入中央仓库，远程源走 npx
     skillhome config            查看当前配置
     skillhome help              显示此帮助
 

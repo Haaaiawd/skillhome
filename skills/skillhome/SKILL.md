@@ -7,9 +7,11 @@ description: >-
   Gemini, Open Cloud, Hermes, etc.), unify skill storage, fix broken skill
   junctions, or says "skillhome", "统一管理 skill", "skill 映射",
   "skill 同步", "共享 skill", "在 Devin 里用 Codex 的 skill", or similar
-  cross-agent skill requests. To install a new skill from skills.sh, use
-  "skillhome add <source> -g" (wraps npx skills add, auto-syncs to central
-  repo, global-shares to all agents). To install SkillHome itself, run
+  cross-agent skill requests. To install a skill, use
+  "skillhome add <source> -g": local zip/directory is installed directly
+  into the central repo (no npx needed, handles non-UTF-8 SKILL.md);
+  remote sources (owner/repo, URL) wrap `npx skills add`. Auto-syncs and
+  global-shares to all agents. To install SkillHome itself, run
   "npx skills add Haaaiawd/skillhome -g" or download from
   https://github.com/Haaaiawd/skillhome/releases.
 ---
@@ -43,8 +45,9 @@ Run `status` first, then act based on the result:
 - **New agent or skill repo installed** → `discover` then `sync`
 - **Reals > 0** → `sync` — migrate real dirs to central, replace with links
 - **Broken/stale links** → `sync --full` — rebuild all links
-- **User wants a skill from skills.sh** → `add <source> -g` — wraps
-  `npx skills add`, auto-syncs to central, global-shares
+- **User wants a skill from skills.sh** → `add <source> -g` — local
+  zip/dir installs directly; remote source wraps `npx skills add`;
+  auto-syncs to central, global-shares
 - **Expose one skill to one agent** → `link <skill> <agent>`
 - **Remove a skill from an agent** → `unlink <skill> <agent>`
 - **User just wants info** → `status` / `list` / `config` — answer and stop
@@ -72,7 +75,7 @@ python ~/.skillhome/bin/skillhome.py <command>
 | `link <skill> <agent>` | Create link from agent dir to central skill |
 | `unlink <skill> <agent>` | Remove link from agent dir (keeps central file) |
 | `global <skill> [on\|off]` | Toggle global sharing flag |
-| `add <source> [opts]` | Wrap `npx skills add`, then auto-sync |
+| `add <source> [opts]` | Install skill: local zip/dir → central repo directly; remote → `npx skills add`; auto-sync |
 | `config` | Show current configuration |
 | `help` | Show help |
 
