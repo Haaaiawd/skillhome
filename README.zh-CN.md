@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/PowerShell-7+-5391FE?style=for-the-badge&logo=powershell&logoColor=white"/>
+  <img src="https://img.shields.io/badge/Python-3.8+-3776AB?style=for-the-badge&logo=python&logoColor=white"/>
   <img src="https://img.shields.io/badge/Windows-NTFS-0078D6?style=for-the-badge&logo=windows&logoColor=white"/>
   <img src="https://img.shields.io/badge/Linux-symlink-FCC624?style=for-the-badge&logo=linux&logoColor=black"/>
   <img src="https://img.shields.io/badge/macOS-symlink-000000?style=for-the-badge&logo=apple&logoColor=white"/>
@@ -99,28 +99,46 @@ VSCode 扩展、Trae 内置目录、Codex `vendor_imports/curated`、`node_modul
 npx skills add Haaaiawd/skillhome -g
 ```
 
-然后对 agent 说"帮我设置 SkillHome"，它会下载 bin 脚本并运行初始化。
+然后对 agent 说"帮我设置 SkillHome"，它会运行初始化。
 
 ### 方式二：从 GitHub Release 下载
 
+**Windows:**
 ```powershell
 mkdir -Force "$env:USERPROFILE\.skillhome"
 Invoke-WebRequest -Uri "https://github.com/Haaaiawd/skillhome/releases/latest/download/skillhome.zip" -OutFile "$env:USERPROFILE\.skillhome\skillhome.zip"
 Expand-Archive -Path "$env:USERPROFILE\.skillhome\skillhome.zip" -DestinationPath "$env:USERPROFILE\.skillhome" -Force
 Remove-Item "$env:USERPROFILE\.skillhome\skillhome.zip"
-& "$env:USERPROFILE\.skillhome\bin\skillhome.ps1" init
-& "$env:USERPROFILE\.skillhome\bin\skillhome.ps1" sync
+python "$env:USERPROFILE\.skillhome\bin\skillhome.py" init
+python "$env:USERPROFILE\.skillhome\bin\skillhome.py" sync
+```
+
+**Linux / macOS:**
+```bash
+mkdir -p ~/.skillhome
+curl -L https://github.com/Haaaiawd/skillhome/releases/latest/download/skillhome.zip -o ~/.skillhome/skillhome.zip
+cd ~/.skillhome && unzip skillhome.zip && rm skillhome.zip
+python3 ~/.skillhome/bin/skillhome.py init
+python3 ~/.skillhome/bin/skillhome.py sync
 ```
 
 ### 方式三：git clone
 
+**Windows:**
 ```powershell
 git clone https://github.com/Haaaiawd/skillhome.git "$env:USERPROFILE\.skillhome"
-& "$env:USERPROFILE\.skillhome\bin\skillhome.ps1" init
-& "$env:USERPROFILE\.skillhome\bin\skillhome.ps1" sync
+python "$env:USERPROFILE\.skillhome\bin\skillhome.py" init
+python "$env:USERPROFILE\.skillhome\bin\skillhome.py" sync
 ```
 
-> **前提：** PowerShell 7（`pwsh`）。脚本会自动探测路径。
+**Linux / macOS:**
+```bash
+git clone https://github.com/Haaaiawd/skillhome.git ~/.skillhome
+python3 ~/.skillhome/bin/skillhome.py init
+python3 ~/.skillhome/bin/skillhome.py sync
+```
+
+> **前提：** Python 3.8+。零第三方依赖。
 
 ## 命令
 
@@ -129,6 +147,7 @@ git clone https://github.com/Haaaiawd/skillhome.git "$env:USERPROFILE\.skillhome
 | `skillhome init` | 首次初始化。自动发现所有 skill 目录，生成 `config.json` |
 | `skillhome discover` | 重新扫描（装了新 agent 后运行） |
 | `skillhome sync` | 迁移新 skill 到中央 + 修复缺失的 junction |
+| `skillhome sync --full` | 完整同步：重建所有链接（用于修复失效链接） |
 | `skillhome status` | 查看中央 skill 数、junction 数、各 agent 分布 |
 | `skillhome list` | 列出所有 skill 及其来源 |
 | `skillhome link <skill> <agent>` | 把某个 skill 暴露给指定 agent |
@@ -138,9 +157,16 @@ git clone https://github.com/Haaaiawd/skillhome.git "$env:USERPROFILE\.skillhome
 | `skillhome config` | 查看当前配置 |
 | `skillhome help` | 显示帮助 |
 
-**可选别名**（加到 PowerShell profile）：
+**可选别名：**
+
+Windows（PowerShell profile）：
 ```powershell
-Set-Alias skillhome "$env:USERPROFILE\.skillhome\bin\skillhome.ps1"
+function skillhome { python "$env:USERPROFILE\.skillhome\bin\skillhome.py" @args }
+```
+
+Linux/macOS（`~/.bashrc` 或 `~/.zshrc`）：
+```bash
+alias skillhome='python3 ~/.skillhome/bin/skillhome.py'
 ```
 
 ## 工作原理
@@ -162,7 +188,7 @@ Set-Alias skillhome "$env:USERPROFILE\.skillhome\bin\skillhome.ps1"
 
 例外：冲突变体（名字带 `--` 后缀）不会 global。你需要手动选择共享哪个版本：
 
-```powershell
+```
 # 把 Gemini 的 docx 共享给 Devin
 skillhome link docx--gemini devin
 
@@ -220,7 +246,7 @@ Agent B 有 "docx"（Gemini 的实现）
 | Linux | symlink | 否（对 skill 目录有写权限即可） |
 | macOS | symlink | 否（对 skill 目录有写权限即可） |
 
-SkillHome 通过 `$PSVersionTable.Platform` 自动检测平台，使用对应的链接方式。发现模式按平台区分——Windows 探测 `~\.codex\skills`，Unix 探测 `~/.codex/skills` 和 `~/.config/codex/skills`。
+SkillHome 通过 `platform.system()` 自动检测平台，使用对应的链接方式。发现模式按平台区分——Windows 探测 `~\.codex\skills`，Unix 探测 `~/.codex/skills` 和 `~/.config/codex/skills`。
 
 ## 文件结构
 
@@ -233,10 +259,7 @@ SkillHome 通过 `$PSVersionTable.Platform` 自动检测平台，使用对应的
 │   ├── architect-prompts/
 │   └── ...
 ├── bin/
-│   ├── Config.ps1             # 共享配置模块
-│   ├── Discover-SkillDirs.ps1 # 自动检索（特征识别）
-│   ├── Sync-SkillHome.ps1     # 同步引擎
-│   └── skillhome.ps1          # CLI 入口
+│   └── skillhome.py           # 单文件 CLI（全部命令）
 └── skills/
     └── skillhome/
         └── SKILL.md           # Skill 定义（供 skills.sh）
@@ -244,7 +267,7 @@ SkillHome 通过 `$PSVersionTable.Platform` 自动检测平台，使用对应的
 
 ## 可移植性
 
-零硬编码。所有路径从 `$env:USERPROFILE`（Windows）或 `$env:HOME`（Unix）推导。部署到另一台机器：
+零硬编码。所有路径从 `Path.home()` 推导。部署到另一台机器：
 
 1. 用上面任一方式安装
 2. 运行 `skillhome init`
@@ -254,7 +277,7 @@ SkillHome 通过 `$PSVersionTable.Platform` 自动检测平台，使用对应的
 
 ## 限制
 
-- **需要 PowerShell 7**（`pwsh`）。如果在 PATH 中会自动探测。
+- **需要 Python 3.8+**。零第三方依赖。
 - **无守护进程** — 同步是手动触发的。skill 变化是低频事件，后台 watcher 只增加复杂度不增加价值。
 
 ## 许可

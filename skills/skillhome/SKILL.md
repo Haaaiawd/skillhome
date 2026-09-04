@@ -7,11 +7,11 @@ description: Manage a unified skill repository across multiple AI agent applicat
 
 SkillHome 把分散在多个 agent 应用里的 skill 集中到一个中央仓库，各 agent 目录下只保留 junction/symlink 指向中央。需要时手动跑一次 sync，无常驻进程。
 
-中央仓库位于 `~/.skillhome/skills/`，脚本在 `~/.skillhome/bin/`，配置在 `~/.skillhome/config.json`。路径从用户主目录推导（Windows 用 `$env:USERPROFILE`，Linux/macOS 用 `$HOME`），可移植。
+中央仓库位于 `~/.skillhome/skills/`，脚本在 `~/.skillhome/bin/skillhome.py`，配置在 `~/.skillhome/config.json`。路径从用户主目录推导，可移植。
 
 ## 首次安装
 
-如果 `~/.skillhome/bin/skillhome.ps1` 不存在，先安装 SkillHome 工具。
+如果 `~/.skillhome/bin/skillhome.py` 不存在，先安装 SkillHome 工具。
 
 ### Windows
 
@@ -26,8 +26,8 @@ Remove-Item "$env:USERPROFILE\.skillhome\skillhome.zip"
 git clone https://github.com/Haaaiawd/skillhome.git "$env:USERPROFILE\.skillhome"
 
 # 初始化
-& "$env:USERPROFILE\.skillhome\bin\skillhome.ps1" init
-& "$env:USERPROFILE\.skillhome\bin\skillhome.ps1" sync
+python "$env:USERPROFILE\.skillhome\bin\skillhome.py" init
+python "$env:USERPROFILE\.skillhome\bin\skillhome.py" sync
 ```
 
 ### Linux / macOS
@@ -42,11 +42,11 @@ cd ~/.skillhome && unzip skillhome.zip && rm skillhome.zip
 git clone https://github.com/Haaaiawd/skillhome.git ~/.skillhome
 
 # 初始化
-pwsh ~/.skillhome/bin/skillhome.ps1 init
-pwsh ~/.skillhome/bin/skillhome.ps1 sync
+python3 ~/.skillhome/bin/skillhome.py init
+python3 ~/.skillhome/bin/skillhome.py sync
 ```
 
-> 前提：PowerShell 7（`pwsh`）。Windows 自带，Linux/macOS 需 `sudo apt install pwsh` 或 `brew install powershell/tap/powershell`。
+> 前提：Python 3.8+。Windows 用 `python`，Linux/macOS 用 `python3`。零第三方依赖。
 
 ## 判断该做什么
 
@@ -59,7 +59,7 @@ pwsh ~/.skillhome/bin/skillhome.ps1 sync
 - **用户想在某个 agent 里用另一个 agent 的 skill** → 跑 `skillhome link <skill> <agent>`
 - **用户想从某个 agent 移除一个 skill** → 跑 `skillhome unlink <skill> <agent>`
 - **用户想看有哪些 skill、各自来自哪里** → 跑 `skillhome list`
-- **junction/symlink 指向旧路径或失效** → 跑 `skillhome sync`（完整模式会重建所有链接）
+- **junction/symlink 指向旧路径或失效** → 跑 `skillhome sync --full`（重建所有链接）
 
 不要在不需要时主动跑 sync。skill 变化是低频事件，每次 sync 前先看 status。
 
@@ -68,23 +68,23 @@ pwsh ~/.skillhome/bin/skillhome.ps1 sync
 ### Windows
 
 ```powershell
-& "$env:USERPROFILE\.skillhome\bin\skillhome.ps1" <command>
+python "$env:USERPROFILE\.skillhome\bin\skillhome.py" <command>
 ```
 
 可选别名（加到 PowerShell profile）：
 ```powershell
-Set-Alias skillhome "$env:USERPROFILE\.skillhome\bin\skillhome.ps1"
+function skillhome { python "$env:USERPROFILE\.skillhome\bin\skillhome.py" @args }
 ```
 
 ### Linux / macOS
 
 ```bash
-pwsh ~/.skillhome/bin/skillhome.ps1 <command>
+python3 ~/.skillhome/bin/skillhome.py <command>
 ```
 
 可选别名（加到 `~/.bashrc` 或 `~/.zshrc`）：
 ```bash
-alias skillhome='pwsh ~/.skillhome/bin/skillhome.ps1'
+alias skillhome='python3 ~/.skillhome/bin/skillhome.py'
 ```
 
 ## sync 的行为
@@ -96,7 +96,7 @@ alias skillhome='pwsh ~/.skillhome/bin/skillhome.ps1'
 3. 同名 skill 按文件哈希算相似度：≥95% 合并取较新版本、来源合并记录；<95% 加来源后缀保留为独立条目（如 `xlsx--qoderworkcn`）
 4. 补齐缺失的链接，更新 `.skillhome.json` 元数据
 
-增量模式（`skillhome sync` 默认）只补缺失链接、迁移新增真实目录，不破坏已有链接。完整模式（脚本内部 `-Incremental` 未传时）会重建所有链接，用于修复指向旧路径的链接。
+增量模式（`skillhome sync` 默认）只补缺失链接、迁移新增真实目录，不破坏已有链接。完整模式（`skillhome sync --full`）会重建所有链接，用于修复指向旧路径的链接。
 
 ## 全局共享
 
@@ -104,7 +104,7 @@ alias skillhome='pwsh ~/.skillhome/bin/skillhome.ps1'
 
 例外：冲突变体（名字带 `--` 后缀）不会 global。需要手动选择共享哪个版本：
 
-```powershell
+```
 skillhome link docx--gemini devin   # 把 Gemini 的 docx 共享给 Devin
 skillhome global some-skill off     # 取消某个 skill 的全局共享
 ```
@@ -138,5 +138,5 @@ skillhome global some-skill off     # 取消某个 skill 的全局共享
 
 - **Windows**：NTFS junction，不需要管理员权限
 - **Linux/macOS**：symlink，需要对 skill 目录的写权限
-- 需要 PowerShell 7（`pwsh`），脚本自动检测平台并选择正确的链接方式
+- 依赖：Python 3.8+，零第三方包
 - 路径分隔符和发现模式按平台自动切换

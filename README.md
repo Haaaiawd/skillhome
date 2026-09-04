@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/PowerShell-7+-5391FE?style=for-the-badge&logo=powershell&logoColor=white"/>
+  <img src="https://img.shields.io/badge/Python-3.8+-3776AB?style=for-the-badge&logo=python&logoColor=white"/>
   <img src="https://img.shields.io/badge/Windows-NTFS-0078D6?style=for-the-badge&logo=windows&logoColor=white"/>
   <img src="https://img.shields.io/badge/Linux-symlink-FCC624?style=for-the-badge&logo=linux&logoColor=black"/>
   <img src="https://img.shields.io/badge/macOS-symlink-000000?style=for-the-badge&logo=apple&logoColor=white"/>
@@ -99,28 +99,46 @@ VSCode extensions, Trae builtins, Codex `vendor_imports/curated`, `node_modules`
 npx skills add Haaaiawd/skillhome -g
 ```
 
-Then ask your agent "help me set up SkillHome" and it will download the bin scripts and run initialization.
+Then ask your agent "help me set up SkillHome" and it will run initialization.
 
 ### Method 2: from GitHub Release
 
+**Windows:**
 ```powershell
 mkdir -Force "$env:USERPROFILE\.skillhome"
 Invoke-WebRequest -Uri "https://github.com/Haaaiawd/skillhome/releases/latest/download/skillhome.zip" -OutFile "$env:USERPROFILE\.skillhome\skillhome.zip"
 Expand-Archive -Path "$env:USERPROFILE\.skillhome\skillhome.zip" -DestinationPath "$env:USERPROFILE\.skillhome" -Force
 Remove-Item "$env:USERPROFILE\.skillhome\skillhome.zip"
-& "$env:USERPROFILE\.skillhome\bin\skillhome.ps1" init
-& "$env:USERPROFILE\.skillhome\bin\skillhome.ps1" sync
+python "$env:USERPROFILE\.skillhome\bin\skillhome.py" init
+python "$env:USERPROFILE\.skillhome\bin\skillhome.py" sync
+```
+
+**Linux / macOS:**
+```bash
+mkdir -p ~/.skillhome
+curl -L https://github.com/Haaaiawd/skillhome/releases/latest/download/skillhome.zip -o ~/.skillhome/skillhome.zip
+cd ~/.skillhome && unzip skillhome.zip && rm skillhome.zip
+python3 ~/.skillhome/bin/skillhome.py init
+python3 ~/.skillhome/bin/skillhome.py sync
 ```
 
 ### Method 3: git clone
 
+**Windows:**
 ```powershell
 git clone https://github.com/Haaaiawd/skillhome.git "$env:USERPROFILE\.skillhome"
-& "$env:USERPROFILE\.skillhome\bin\skillhome.ps1" init
-& "$env:USERPROFILE\.skillhome\bin\skillhome.ps1" sync
+python "$env:USERPROFILE\.skillhome\bin\skillhome.py" init
+python "$env:USERPROFILE\.skillhome\bin\skillhome.py" sync
 ```
 
-> **Prerequisite:** PowerShell 7 (`pwsh`). The scripts auto-detect the path.
+**Linux / macOS:**
+```bash
+git clone https://github.com/Haaaiawd/skillhome.git ~/.skillhome
+python3 ~/.skillhome/bin/skillhome.py init
+python3 ~/.skillhome/bin/skillhome.py sync
+```
+
+> **Prerequisite:** Python 3.8+. Zero third-party dependencies.
 
 ## Commands
 
@@ -129,6 +147,7 @@ git clone https://github.com/Haaaiawd/skillhome.git "$env:USERPROFILE\.skillhome
 | `skillhome init` | First-time setup. Auto-discovers all skill directories, generates `config.json` |
 | `skillhome discover` | Re-scan for skill directories (run after installing a new agent) |
 | `skillhome sync` | Migrate new skills to central repo + repair missing junctions |
+| `skillhome sync --full` | Full sync: rebuild all links (use to fix broken/stale links) |
 | `skillhome status` | Show central skill count, junction count, per-agent breakdown |
 | `skillhome list` | List all skills with their source agents |
 | `skillhome link <skill> <agent>` | Expose a skill to a specific agent |
@@ -138,9 +157,16 @@ git clone https://github.com/Haaaiawd/skillhome.git "$env:USERPROFILE\.skillhome
 | `skillhome config` | Show current configuration |
 | `skillhome help` | Show help |
 
-**Optional alias** (add to your PowerShell profile):
+**Optional alias:**
+
+Windows (PowerShell profile):
 ```powershell
-Set-Alias skillhome "$env:USERPROFILE\.skillhome\bin\skillhome.ps1"
+function skillhome { python "$env:USERPROFILE\.skillhome\bin\skillhome.py" @args }
+```
+
+Linux/macOS (`~/.bashrc` or `~/.zshrc`):
+```bash
+alias skillhome='python3 ~/.skillhome/bin/skillhome.py'
 ```
 
 ## How It Works
@@ -162,7 +188,7 @@ By default, every new skill is marked `global: true`. This means `skillhome sync
 
 The exception: conflict variants (names with `--` suffix) are never global. You choose which version to share manually:
 
-```powershell
+```
 # Share Gemini's docx with Devin
 skillhome link docx--gemini devin
 
@@ -220,7 +246,7 @@ Edit `agentDirs` to add a new agent or remove one you don't want managed.
 | Linux | symlink | No (write access to skill dirs) |
 | macOS | symlink | No (write access to skill dirs) |
 
-SkillHome auto-detects the platform via `$PSVersionTable.Platform` and uses the appropriate link type. Discovery patterns are platform-specific — Windows probes `~\.codex\skills`, Unix probes `~/.codex/skills` and `~/.config/codex/skills`.
+SkillHome auto-detects the platform via `platform.system()` and uses the appropriate link type. Discovery patterns are platform-specific — Windows probes `~\.codex\skills`, Unix probes `~/.codex/skills` and `~/.config/codex/skills`.
 
 ## File Structure
 
@@ -233,10 +259,7 @@ SkillHome auto-detects the platform via `$PSVersionTable.Platform` and uses the 
 │   ├── architect-prompts/
 │   └── ...
 ├── bin/
-│   ├── Config.ps1             # Shared config module
-│   ├── Discover-SkillDirs.ps1 # Auto-discovery (feature-based)
-│   ├── Sync-SkillHome.ps1     # Sync engine
-│   └── skillhome.ps1          # CLI entry point
+│   └── skillhome.py           # Single-file CLI (all commands)
 └── skills/
     └── skillhome/
         └── SKILL.md           # Skill definition (for skills.sh)
@@ -244,7 +267,7 @@ SkillHome auto-detects the platform via `$PSVersionTable.Platform` and uses the 
 
 ## Portability
 
-Zero hardcoding. All paths derive from `$env:USERPROFILE` (Windows) or `$env:HOME` (Unix). To deploy on another machine:
+Zero hardcoding. All paths derive from `Path.home()`. To deploy on another machine:
 
 1. Install via any method above
 2. Run `skillhome init`
@@ -254,7 +277,7 @@ No admin privileges required. No background services. No startup scripts.
 
 ## Limitations
 
-- **PowerShell 7** required (`pwsh`). Auto-detected if on PATH.
+- **Python 3.8+** required. Zero third-party dependencies.
 - **No daemon** — sync is manual by design. Skills change infrequently; a background watcher adds complexity without value.
 
 ## License
