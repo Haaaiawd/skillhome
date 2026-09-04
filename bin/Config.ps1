@@ -89,7 +89,12 @@ if ($SH_IsWindows) {
     '.qwen/skills',
     '.copilot/skills',
     '.local/share/claude/skills',
-    '.local/share/codex/skills'
+    '.local/share/codex/skills',
+    '.hermes/skills',
+    '.hermes/capabilities',
+    '.opencloud/skills',
+    '.opencloud/agent-skills',
+    '.opencloud/learned'
   )
 }
 
