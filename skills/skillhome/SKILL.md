@@ -117,9 +117,11 @@ python ~/.skillhome/bin/skillhome.py global some-skill off
 - 1 such subdir + dir name contains "skill" → also confirmed
 - otherwise → not a skill repo
 
-Phase 1: fast-probe ~30 known agent paths. Phase 2: deep-scan dot-directories
-up to depth 3 — finds repos regardless of name (e.g. `~/.hermes/capabilities`,
-`~/.opencloud/learned`).
+Phase 1: fast-probe known agent paths. Phase 2: deep-scan dot-directories
+up to depth 3 — finds any repo that matches the structural rules above,
+regardless of directory name. As long as skills live under a directory whose
+children follow the SKILL.md / `.skill-metadata.yaml` convention, they are
+discovered. No hardcoded agent names, no special-case paths.
 
 Excluded: VSCode extensions, Trae builtins, Codex `vendor_imports/curated`,
 `node_modules`, cache dirs. These skills belong to the tool, not the user.

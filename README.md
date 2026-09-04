@@ -40,7 +40,7 @@ You have skills scattered across cloud servers, multiple Claude/Codex environmen
 
 Agents like Open Cloud and Hermes can write their own skills through self-learning — but they save them to obscure paths the user never checks. After an update, a reinstall, or a profile reset, these self-evolved skills vanish. The AI improved itself, then forgot the improvement.
 
-**SkillHome fixes this:** Auto-discovery scans by **structural features**, not by directory name. If a directory has ≥2 subdirectories each containing `SKILL.md`, it's a skill repo — regardless of what it's called. Self-evolved skills in `~/.hermes/capabilities` or `~/.opencloud/learned` are found, collected, and preserved in the central repo. Nothing gets lost.
+**SkillHome fixes this:** Auto-discovery scans by **structural features**, not by directory name. If a directory has ≥2 subdirectories each containing `SKILL.md`, it's a skill repo — regardless of what it's called. As long as skills follow the standard SKILL.md / `.skill-metadata.yaml` convention, they are found, collected, and preserved in the central repo. Nothing gets lost.
 
 ## Architecture
 
@@ -86,9 +86,8 @@ Is this a skill repo?
 ```
 
 This means:
-- `~/.hermes/capabilities` with 5 learned skills → **found** (name doesn't matter)
-- `~/.opencloud/agent-skills` with 3 self-written skills → **found**
-- `~/.some-random-dir/skills` with 10 skills → **found**
+- Any agent's `skills/` directory with multiple SKILL.md children → **found**
+- A self-evolved skill repo under any name, as long as it follows the convention → **found**
 - `~/.cache/something` with a random SKILL.md → **not found** (only 1, not a repo)
 
 ### What's excluded

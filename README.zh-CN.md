@@ -40,7 +40,7 @@ SkillHome 把分散在所有 AI Agent 里的 skill 统一收归到一个中央�
 
 像 Open Cloud 和 Hermes 这类 agent，会通过自我学习自己写 skill——但它们存到用户从不会去检查的隐蔽路径。更新、重装、配置重置之后，这些自我进化的 skill 就消失了。AI 提升了自己，然后忘了提升在哪。
 
-**SkillHome 怎么解决：** 自动检索按**结构特征**扫描，不依赖目录名。一个目录只要有 ≥2 个子目录含 `SKILL.md`，它就是 skill 仓库——不管它叫什么。`~/.hermes/capabilities` 或 `~/.opencloud/learned` 里的自我进化 skill 都能被发现、收归、保存在中央仓库。不会丢。
+**SkillHome 怎么解决：** 自动检索按**结构特征**扫描，不依赖目录名。一个目录只要有 ≥2 个子目录含 `SKILL.md`，它就是 skill 仓库——不管它叫什么。只要 skill 遵循标准的 `SKILL.md` / `.skill-metadata.yaml` 约定，就能被发现、收归、保存在中央仓库。不会丢。
 
 ## 架构
 
@@ -86,9 +86,8 @@ SkillHome 把分散在所有 AI Agent 里的 skill 统一收归到一个中央�
 ```
 
 这意味着：
-- `~/.hermes/capabilities` 有 5 个学习到的 skill → **能找到**（名字不重要）
-- `~/.opencloud/agent-skills` 有 3 个自写 skill → **能找到**
-- `~/.某个随机目录/skills` 有 10 个 skill → **能找到**
+- 任何 agent 的 `skills/` 目录下有多个含 SKILL.md 的子目录 → **能找到**
+- 任何自我进化的 skill 仓库，只要遵循约定 → **能找到**
 - `~/.cache/something` 有个随机 SKILL.md → **不会找到**（只有 1 个，不是仓库）
 
 ### 排除什么

@@ -67,9 +67,7 @@ else:
         ".trae/skills", ".lingma/skills", ".qwen/skills",
         ".copilot/skills", ".local/share/claude/skills",
         ".local/share/codex/skills",
-        ".hermes/skills", ".hermes/capabilities",
-        ".opencloud/skills", ".opencloud/agent-skills",
-        ".opencloud/learned",
+        ".hermes/skills", ".opencloud/skills",
     ]
 
 # 深度扫描排除的顶级目录
@@ -278,8 +276,6 @@ def derive_agent_name(path: Path) -> str:
         if p.startswith("skill"):
             continue
         if p.endswith("skill") or p.endswith("skills"):
-            continue
-        if p in ("capabilities", "agents", "learned"):
             continue
         name_parts.append(p)
     if not name_parts:
