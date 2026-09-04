@@ -99,43 +99,13 @@ VSCode extensions, Trae builtins, Codex `vendor_imports/curated`, `node_modules`
 npx skills add Haaaiawd/skillhome -g
 ```
 
-Then ask your agent "help me set up SkillHome" and it will run initialization.
-
 ### Method 2: from GitHub Release
 
-**Windows:**
-```powershell
-mkdir -Force "$env:USERPROFILE\.skillhome"
-Invoke-WebRequest -Uri "https://github.com/Haaaiawd/skillhome/releases/latest/download/skillhome.zip" -OutFile "$env:USERPROFILE\.skillhome\skillhome.zip"
-Expand-Archive -Path "$env:USERPROFILE\.skillhome\skillhome.zip" -DestinationPath "$env:USERPROFILE\.skillhome" -Force
-Remove-Item "$env:USERPROFILE\.skillhome\skillhome.zip"
-python "$env:USERPROFILE\.skillhome\bin\skillhome.py" init
-python "$env:USERPROFILE\.skillhome\bin\skillhome.py" sync
-```
+Download [`skillhome.zip`](https://github.com/Haaaiawd/skillhome/releases/latest), extract to `~/.skillhome/`, then:
 
-**Linux / macOS:**
 ```bash
-mkdir -p ~/.skillhome
-curl -L https://github.com/Haaaiawd/skillhome/releases/latest/download/skillhome.zip -o ~/.skillhome/skillhome.zip
-cd ~/.skillhome && unzip skillhome.zip && rm skillhome.zip
-python3 ~/.skillhome/bin/skillhome.py init
-python3 ~/.skillhome/bin/skillhome.py sync
-```
-
-### Method 3: git clone
-
-**Windows:**
-```powershell
-git clone https://github.com/Haaaiawd/skillhome.git "$env:USERPROFILE\.skillhome"
-python "$env:USERPROFILE\.skillhome\bin\skillhome.py" init
-python "$env:USERPROFILE\.skillhome\bin\skillhome.py" sync
-```
-
-**Linux / macOS:**
-```bash
-git clone https://github.com/Haaaiawd/skillhome.git ~/.skillhome
-python3 ~/.skillhome/bin/skillhome.py init
-python3 ~/.skillhome/bin/skillhome.py sync
+python ~/.skillhome/bin/skillhome.py init
+python ~/.skillhome/bin/skillhome.py sync
 ```
 
 > **Prerequisite:** Python 3.8+. Zero third-party dependencies.

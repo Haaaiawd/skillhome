@@ -11,42 +11,22 @@ SkillHome 把分散在多个 agent 应用里的 skill 集中到一个中央仓�
 
 ## 首次安装
 
-如果 `~/.skillhome/bin/skillhome.py` 不存在，先安装 SkillHome 工具。
-
-### Windows
-
-```powershell
-# 方式一：从 Release 下载
-mkdir -Force "$env:USERPROFILE\.skillhome"
-Invoke-WebRequest -Uri "https://github.com/Haaaiawd/skillhome/releases/latest/download/skillhome.zip" -OutFile "$env:USERPROFILE\.skillhome\skillhome.zip"
-Expand-Archive -Path "$env:USERPROFILE\.skillhome\skillhome.zip" -DestinationPath "$env:USERPROFILE\.skillhome" -Force
-Remove-Item "$env:USERPROFILE\.skillhome\skillhome.zip"
-
-# 方式二：git clone
-git clone https://github.com/Haaaiawd/skillhome.git "$env:USERPROFILE\.skillhome"
-
-# 初始化
-python "$env:USERPROFILE\.skillhome\bin\skillhome.py" init
-python "$env:USERPROFILE\.skillhome\bin\skillhome.py" sync
-```
-
-### Linux / macOS
+如果 `~/.skillhome/bin/skillhome.py` 不存在，先安装 SkillHome 工具：
 
 ```bash
-# 方式一：从 Release 下载
-mkdir -p ~/.skillhome
-curl -L https://github.com/Haaaiawd/skillhome/releases/latest/download/skillhome.zip -o ~/.skillhome/skillhome.zip
-cd ~/.skillhome && unzip skillhome.zip && rm skillhome.zip
-
-# 方式二：git clone
-git clone https://github.com/Haaaiawd/skillhome.git ~/.skillhome
-
-# 初始化
-python3 ~/.skillhome/bin/skillhome.py init
-python3 ~/.skillhome/bin/skillhome.py sync
+npx skills add Haaaiawd/skillhome -g
 ```
 
-> 前提：Python 3.8+。Windows 用 `python`，Linux/macOS 用 `python3`。零第三方依赖。
+或从 [GitHub Release](https://github.com/Haaaiawd/skillhome/releases/latest) 下载 `skillhome.zip`，解压到 `~/.skillhome/`。
+
+然后初始化：
+
+```bash
+python ~/.skillhome/bin/skillhome.py init
+python ~/.skillhome/bin/skillhome.py sync
+```
+
+> 前提：Python 3.8+。零第三方依赖。
 
 ## 判断该做什么
 

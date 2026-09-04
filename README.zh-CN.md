@@ -99,43 +99,13 @@ VSCode 扩展、Trae 内置目录、Codex `vendor_imports/curated`、`node_modul
 npx skills add Haaaiawd/skillhome -g
 ```
 
-然后对 agent 说"帮我设置 SkillHome"，它会运行初始化。
-
 ### 方式二：从 GitHub Release 下载
 
-**Windows:**
-```powershell
-mkdir -Force "$env:USERPROFILE\.skillhome"
-Invoke-WebRequest -Uri "https://github.com/Haaaiawd/skillhome/releases/latest/download/skillhome.zip" -OutFile "$env:USERPROFILE\.skillhome\skillhome.zip"
-Expand-Archive -Path "$env:USERPROFILE\.skillhome\skillhome.zip" -DestinationPath "$env:USERPROFILE\.skillhome" -Force
-Remove-Item "$env:USERPROFILE\.skillhome\skillhome.zip"
-python "$env:USERPROFILE\.skillhome\bin\skillhome.py" init
-python "$env:USERPROFILE\.skillhome\bin\skillhome.py" sync
-```
+下载 [`skillhome.zip`](https://github.com/Haaaiawd/skillhome/releases/latest)，解压到 `~/.skillhome/`，然后：
 
-**Linux / macOS:**
 ```bash
-mkdir -p ~/.skillhome
-curl -L https://github.com/Haaaiawd/skillhome/releases/latest/download/skillhome.zip -o ~/.skillhome/skillhome.zip
-cd ~/.skillhome && unzip skillhome.zip && rm skillhome.zip
-python3 ~/.skillhome/bin/skillhome.py init
-python3 ~/.skillhome/bin/skillhome.py sync
-```
-
-### 方式三：git clone
-
-**Windows:**
-```powershell
-git clone https://github.com/Haaaiawd/skillhome.git "$env:USERPROFILE\.skillhome"
-python "$env:USERPROFILE\.skillhome\bin\skillhome.py" init
-python "$env:USERPROFILE\.skillhome\bin\skillhome.py" sync
-```
-
-**Linux / macOS:**
-```bash
-git clone https://github.com/Haaaiawd/skillhome.git ~/.skillhome
-python3 ~/.skillhome/bin/skillhome.py init
-python3 ~/.skillhome/bin/skillhome.py sync
+python ~/.skillhome/bin/skillhome.py init
+python ~/.skillhome/bin/skillhome.py sync
 ```
 
 > **前提：** Python 3.8+。零第三方依赖。
