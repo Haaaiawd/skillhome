@@ -93,20 +93,11 @@ VSCode 扩展、Trae 内置目录、Codex `vendor_imports/curated`、`node_modul
 
 ## 安装
 
-### 方式一：通过 skills.sh
-
 ```bash
 npx skills add Haaaiawd/skillhome -g
 ```
 
-### 方式二：从 GitHub Release 下载
-
-下载 [`skillhome.zip`](https://github.com/Haaaiawd/skillhome/releases/latest)，解压到 `~/.skillhome/`，然后：
-
-```bash
-python ~/.skillhome/bin/skillhome.py init
-python ~/.skillhome/bin/skillhome.py sync
-```
+或从 [GitHub Releases](https://github.com/Haaaiawd/skillhome/releases/latest) 下载 `skillhome.zip`。
 
 > **前提：** Python 3.8+。零第三方依赖。
 

@@ -11,20 +11,11 @@ SkillHome 把分散在多个 agent 应用里的 skill 集中到一个中央仓�
 
 ## 首次安装
 
-如果 `~/.skillhome/bin/skillhome.py` 不存在，先安装 SkillHome 工具：
-
 ```bash
 npx skills add Haaaiawd/skillhome -g
 ```
 
-或从 [GitHub Release](https://github.com/Haaaiawd/skillhome/releases/latest) 下载 `skillhome.zip`，解压到 `~/.skillhome/`。
-
-然后初始化：
-
-```bash
-python ~/.skillhome/bin/skillhome.py init
-python ~/.skillhome/bin/skillhome.py sync
-```
+或从 [GitHub Releases](https://github.com/Haaaiawd/skillhome/releases/latest) 下载 `skillhome.zip`。
 
 > 前提：Python 3.8+。零第三方依赖。
 

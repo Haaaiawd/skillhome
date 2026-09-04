@@ -93,20 +93,11 @@ VSCode extensions, Trae builtins, Codex `vendor_imports/curated`, `node_modules`
 
 ## Installation
 
-### Method 1: via skills.sh
-
 ```bash
 npx skills add Haaaiawd/skillhome -g
 ```
 
-### Method 2: from GitHub Release
-
-Download [`skillhome.zip`](https://github.com/Haaaiawd/skillhome/releases/latest), extract to `~/.skillhome/`, then:
-
-```bash
-python ~/.skillhome/bin/skillhome.py init
-python ~/.skillhome/bin/skillhome.py sync
-```
+Or download [`skillhome.zip`](https://github.com/Haaaiawd/skillhome/releases/latest) from GitHub Releases.
 
 > **Prerequisite:** Python 3.8+. Zero third-party dependencies.
 
