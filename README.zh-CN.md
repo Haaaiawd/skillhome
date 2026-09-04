@@ -16,7 +16,11 @@
 
 ---
 
-一个中央仓库，所有 AI agent 通过 junction/symlink 读取。没有守护进程，没有后台服务——需要时跑一次 `skillhome sync` 就行。
+> *"你的 Agent 可以有很多个，但 Skill 应该只有一个家。"*
+
+SkillHome 把分散在所有 AI Agent 里的 skill 统一收归到一个中央仓库。各 Agent 通过 junction/symlink 读取——一个源头，没有重复副本，不会静默丢失。自动发现按结构特征识别 skill 仓库（不依赖目录名），冲突处理按内容相似度合并或保留变体，全局共享让新 skill 默认分发给所有 Agent。
+
+没有守护进程，没有后台服务——需要时跑一次 `skillhome sync` 就行。
 
 ## 痛点
 

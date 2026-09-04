@@ -16,7 +16,11 @@
 
 ---
 
-One central repository. Every AI agent reads from it through junctions. No daemons, no background services — just run `skillhome sync` when you need it.
+> *"You can have many AI agents, but your skills should have only one home."*
+
+SkillHome unifies skills across all your AI agents into a single central repository. Each agent reads from it through junctions or symlinks — one source of truth, no duplicate copies, no silent loss. Auto-discovery finds skill repos by structure (not by name), conflict resolution merges or preserves variants by content similarity, and global sharing distributes new skills to every agent by default.
+
+No daemons, no background services — just run `skillhome sync` when you need it.
 
 ## Pain Points
 
