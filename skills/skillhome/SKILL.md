@@ -97,8 +97,11 @@ Four phases, no user intervention needed:
    junction/symlink
 3. **Resolve conflicts** — same-name skills compared by SHA-256 file hash:
    - similarity ≥ 0.95 → merge, keep newer version, union source list
-   - similarity < 0.95 → keep both, suffix variant with source
-     (e.g. `docx--gemini`)
+   - similarity < 0.95, one real copy vs central → same-name update:
+     newer version written to central, replaced version backed up to
+     `~/.skillhome/backups/<name>.bak.<ts>/`
+   - similarity < 0.95, multiple real copies in one sync → keep both,
+     suffix variant with source (e.g. `docx--gemini`)
 4. **Distribute** — create missing links, update `.skillhome.json` metadata
 
 Incremental (default): only migrate new real dirs and create missing links.

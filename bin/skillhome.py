@@ -529,6 +529,17 @@ def write_meta(skill_path: Path, meta: dict):
     )
 
 
+def _next_backup_path(name: str) -> Path:
+    """backups/ 下 <name>.bak.<时间戳> 的唯一路径；重名追加 -2/-3...。"""
+    stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    dest = BACKUP_DIR / f"{name}.bak.{stamp}"
+    n = 1
+    while dest.exists():
+        n += 1
+        dest = BACKUP_DIR / f"{name}.bak.{stamp}-{n}"
+    return dest
+
+
 # ============================================================
 # sync — 核心同步逻辑
 # ============================================================
@@ -631,6 +642,10 @@ def cmd_sync(dry_run=False, incremental=True, verbose=False):
         elif len(real_agents) >= 1 and central_exists:
             central_hashes = get_dir_hashes(central_existing)
             central_mtime = get_skill_mtime(central_existing)
+            # 唯一真实副本与中央同名 = 同名更新（用户就地大改），
+            # 即使相似度低于阈值也写回中央，不产生 -- 孤儿变体；
+            # -- 后缀只保留给多个真实副本同轮冲突的场景
+            single_source = len(real_agents) == 1
 
             for src_agent in real_agents:
                 src_path = Path(info["real_paths"][src_agent])
@@ -646,10 +661,29 @@ def cmd_sync(dry_run=False, incremental=True, verbose=False):
                             shutil.rmtree(central_existing, ignore_errors=True)
                             shutil.move(str(src_path), str(central_existing))
                         central_mtime = src_mtime
+                        central_hashes = src_hashes
                     else:
                         log(f"{sname} : 保留中央版本，删除 {src_agent} 副本 (较旧)")
                         if not dry_run:
                             shutil.rmtree(src_path, ignore_errors=True)
+                elif single_source:
+                    # 同名更新：较新版本进中央，被替换的一版备份到 backups/
+                    bak = _next_backup_path(sname)
+                    if src_mtime > central_mtime:
+                        log(f"{sname} : {src_agent} 为同名更新 (sim={sim})，"
+                            f"写回中央，旧版备份 -> {bak.name}")
+                        if not dry_run:
+                            BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+                            shutil.move(str(central_existing), str(bak))
+                            shutil.move(str(src_path), str(central_existing))
+                        central_mtime = src_mtime
+                        central_hashes = src_hashes
+                    else:
+                        log(f"{sname} : {src_agent} 差异副本较旧 (sim={sim})，"
+                            f"保留中央版本，副本备份 -> {bak.name}")
+                        if not dry_run:
+                            BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+                            shutil.move(str(src_path), str(bak))
                 else:
                     suffixed = f"{sname}--{src_agent}"
                     suffixed_central = CENTRAL_SKILLS / suffixed

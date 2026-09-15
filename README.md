@@ -150,9 +150,10 @@ alias skillhome='python3 ~/.skillhome/bin/skillhome.py'
 
 1. **Scan** — Read all agent directories from `config.json`, classify each entry as real or junction
 2. **Migrate** — Move real skill directories into `~/.skillhome/skills/`, replace originals with junctions
-3. **Resolve conflicts** — When two agents have a skill with the same name:
+3. **Resolve conflicts** — When agents have a skill with the same name:
    - Similarity ≥ 95% (by file hash) → **merge**, keep the newer version, union the source list
-   - Similarity < 95% → **keep both**, suffix the variant with its source (e.g. `docx--gemini`)
+   - Similarity < 95%, **one** real copy vs central → **same-name update**: the newer version is written back to central, the replaced version is backed up to `~/.skillhome/backups/` (how a local rewrite propagates instead of becoming an orphan)
+   - Similarity < 95%, **multiple** real copies in one sync → **keep both**, suffix the variants with their source (e.g. `docx--gemini`)
 4. **Distribute** — Create junctions for all agents that should see each skill
 
 ### Global Sharing
@@ -182,13 +183,14 @@ Agent B has "docx" (Gemini's implementation)
         ▼               ▼
    ≥ 95% similar    < 95% different
         │               │
-        ▼               ▼
-    Merge: keep    Keep both:
-    newer version  docx (A's version)
-    union sources  docx--B (B's version)
+        ▼               ├─ one real copy: same-name update,
+    Merge: keep       newer version wins, replaced version
+    newer version     backed up to ~/.skillhome/backups/
+    union sources     └─ two+ real copies: keep both,
+                        docx (winner) + docx--B
 ```
 
-Both versions survive. No data loss. The `.skillhome.json` metadata file in each skill records its source agents.
+Both versions survive — as live variants for genuine collisions, or as timestamped backups for same-name updates. No data loss. The `.skillhome.json` metadata file in each skill records its source agents.
 
 ## Cloud Sync (Optional)
 
