@@ -37,6 +37,7 @@ CENTRAL_SKILLS = HOME_ROOT / "skills"
 BIN_DIR = HOME_ROOT / "bin"
 CONFIG_PATH = HOME_ROOT / "config.json"
 LOG_FILE = HOME_ROOT / "skillhome.log"
+BACKUP_DIR = HOME_ROOT / "backups"
 
 DEFAULT_SKIP_NAMES = [".system", ".git", ".temp", "_shared"]
 DEFAULT_SIMILARITY_THRESHOLD = 0.95
@@ -190,16 +191,43 @@ def load_config():
         return None
 
 
-def save_config(agent_dirs, skip_names=None, similarity_threshold=None):
-    cfg = {
+def _config_scaffold():
+    return {
         "version": "1.0",
         "createdAt": datetime.now().isoformat(),
+        "userProfile": str(HOME),
+        "centralSkills": str(CENTRAL_SKILLS),
+        "agentDirs": {},
+        "skipNames": DEFAULT_SKIP_NAMES,
+        "similarityThreshold": DEFAULT_SIMILARITY_THRESHOLD,
+    }
+
+
+def save_config(agent_dirs, skip_names=None, similarity_threshold=None):
+    # merge 写回：保留 cloudRemote 等本函数不管理的字段
+    cfg = load_config() or _config_scaffold()
+    cfg.setdefault("createdAt", datetime.now().isoformat())
+    cfg.update({
+        "version": "1.0",
         "userProfile": str(HOME),
         "centralSkills": str(CENTRAL_SKILLS),
         "agentDirs": agent_dirs,
         "skipNames": skip_names or DEFAULT_SKIP_NAMES,
         "similarityThreshold": similarity_threshold or DEFAULT_SIMILARITY_THRESHOLD,
-    }
+    })
+    CONFIG_PATH.write_text(
+        json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def patch_config(updates=None, deletes=()):
+    """对 config.json 做增量更新；不存在时先建脚手架（agentDirs 为空）。"""
+    cfg = load_config() or _config_scaffold()
+    for k in deletes:
+        cfg.pop(k, None)
+    if updates:
+        cfg.update(updates)
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(
         json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8"
     )
@@ -525,8 +553,11 @@ def cmd_sync(dry_run=False, incremental=True, verbose=False):
             if not cs.is_dir():
                 continue
             meta = read_meta(cs)
-            if meta and meta.get("sources"):
-                central_distribution[cs.name] = list(meta["sources"])
+            # 无 meta 的中央 skill（如云端 pull 下来的）也要注册，
+            # 否则永远不会进入分发阶段
+            central_distribution[cs.name] = (
+                list(meta["sources"]) if meta and meta.get("sources") else []
+            )
 
     for agent_name, agent_dir_str in agent_dirs.items():
         agent_dir = Path(agent_dir_str)
@@ -699,7 +730,8 @@ def cmd_sync(dry_run=False, incremental=True, verbose=False):
             if not cpath or not cpath.exists():
                 continue
             meta = read_meta(cpath)
-            is_global = meta and meta.get("global", False)
+            # meta 缺失时套用阶段 4 的默认规则：非 -- 变体默认 global
+            is_global = (meta or {}).get("global", "--" not in sname)
 
             target_agents = skill_distribution[sname]
             if is_global:
@@ -740,7 +772,7 @@ def cmd_sync(dry_run=False, incremental=True, verbose=False):
             if not cpath or not cpath.exists():
                 continue
             meta = read_meta(cpath)
-            is_global = meta and meta.get("global", False)
+            is_global = (meta or {}).get("global", "--" not in sname)
 
             target_agents = skill_distribution[sname]
             if is_global:
@@ -1089,7 +1121,7 @@ def install_local_to_central(src, is_zip):
     dest = CENTRAL_SKILLS / safe
 
     if dest.exists():
-        bak_dir = HOME_ROOT / "backups"
+        bak_dir = BACKUP_DIR
         bak_dir.mkdir(parents=True, exist_ok=True)
         bak = bak_dir / (dest.name + ".bak." + datetime.now().strftime("%Y%m%d%H%M%S"))
         shutil.move(str(dest), str(bak))
@@ -1165,6 +1197,555 @@ def cmd_add(args):
 
 
 # ============================================================
+# cloud — rclone 双向云同步（可选，方案 B）
+# ============================================================
+# 同步根固定为 ~/.skillhome/skills/。config.json / skillhome.log /
+# backups/ 是它的兄弟节点，天然不进云端，无需排除规则。
+# .skillhome.json 随 skill 同步（global 标记跨机传播）；其中 sources
+# 可能含他机 agent 名，建链时 agent_dirs.get() 找不到即自动跳过，无害。
+# rclone 是外部二进制：未安装 / 未配置 remote 时本地功能零影响。
+# bisync 是真双向 —— pull 与 push 共用同一调用，差别只在本地 sync 的时机。
+CLOUD_DEFAULT_SUBDIR = "skillhome/skills"
+
+# 只排 OS 垃圾，不排任何 skill 内容
+CLOUD_EXCLUDES = [
+    ".DS_Store", "._*",
+    "Thumbs.db", "desktop.ini", "~$*",
+]
+
+
+def _rclone_bin():
+    return shutil.which("rclone")
+
+
+def _rclone_install_hint():
+    print("未检测到 rclone，云同步不可用。安装方法：")
+    if IS_WINDOWS:
+        print("  winget install rclone")
+    elif platform.system() == "Darwin":
+        print("  brew install rclone")
+    else:
+        print("  sudo apt install rclone    (发行版包可能偏旧)")
+        print("  或: curl https://rclone.org/install.sh | sudo bash")
+    print("安装后运行 `rclone config` 创建 remote（如 gdrive）。无浏览器的")
+    print("机器可在本机 `rclone authorize \"drive\"` 取 token 贴回配置。")
+
+
+def _remote_name_and_path(spec):
+    """规范化用户输入为 (remote 名, 完整 rclone 路径)。
+
+    'gdrive' / 'gdrive:'   -> ('gdrive', 'gdrive:skillhome/skills')
+    'gdrive:foo/bar'       -> ('gdrive', 'gdrive:foo/bar')
+    """
+    spec = spec.strip().rstrip("/")
+    if ":" in spec:
+        name, _, sub = spec.partition(":")
+        name = name.strip()
+        sub = sub.strip().strip("/")
+        path = f"{name}:{sub}" if sub else f"{name}:{CLOUD_DEFAULT_SUBDIR}"
+    else:
+        name = spec
+        path = f"{spec}:{CLOUD_DEFAULT_SUBDIR}"
+    return name, path
+
+
+def _rclone_listremotes(rclone):
+    """返回已注册 remote 名集合（如 {'gdrive:'}）；查询失败返回 None。"""
+    try:
+        r = subprocess.run([rclone, "listremotes"],
+                           capture_output=True, text=True, timeout=20)
+        if r.returncode != 0:
+            return None
+        return set(l.strip() for l in r.stdout.splitlines() if l.strip())
+    except Exception:
+        return None
+
+
+def _rclone_bisync_flags(rclone):
+    """探测本机 rclone 的 bisync 支持哪些 flag（版本差异兜底）。"""
+    try:
+        r = subprocess.run([rclone, "bisync", "--help"],
+                           capture_output=True, text=True, timeout=20)
+        return set(re.findall(r"--([a-z0-9-]+)", r.stdout + r.stderr))
+    except Exception:
+        return set()
+
+
+def _cloud_require_ready():
+    """公共守卫。成功返回 (cfg, rclone, remote_path)，失败打印原因返回 None。"""
+    rclone = _rclone_bin()
+    if not rclone:
+        _rclone_install_hint()
+        return None
+    cfg = load_config()
+    if not cfg:
+        print("config.json 不存在，请先运行: skillhome init")
+        print("（新机器顺序: rclone config -> cloud remote set -> cloud pull -> init）")
+        return None
+    spec = cfg.get("cloudRemote")
+    if not spec or not cfg.get("cloudEnabled", True):
+        print("云同步未配置。先运行: skillhome cloud remote set <remote>")
+        print("示例: skillhome cloud remote set gdrive:")
+        return None
+    _, remote_path = _remote_name_and_path(spec)
+    return cfg, rclone, remote_path
+
+
+# ------------------------------------------------------------
+# cloud 前置自动备份
+# ------------------------------------------------------------
+# 每次 pull/push/sync 前把 skills/（含每个 skill 的 .skillhome.json）
+# 和 config.json 复制到 backups/pre-cloud-sync-<ts>/。skillhome.log 与
+# backups/ 自身不进备份。保留最近 3 份，超出自动轮转；备份失败即终止同步。
+CLOUD_BACKUP_PREFIX = "pre-cloud-sync-"
+CLOUD_BACKUP_KEEP = 3
+
+
+def _dir_size(path: Path) -> int:
+    """目录/文件总字节数；不可读文件跳过。"""
+    if path.is_file():
+        try:
+            return path.stat().st_size
+        except OSError:
+            return 0
+    total = 0
+    if not path.is_dir():
+        return total
+    try:
+        for f in path.rglob("*"):
+            try:
+                if f.is_file() and not f.is_symlink():
+                    total += f.stat().st_size
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return total
+
+
+def _fmt_size(n) -> str:
+    n = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{int(n)}B" if unit == "B" else f"{n:.1f}{unit}"
+        n /= 1024
+
+
+def _cloud_backup_sources():
+    """(源, 备份内相对路径)。.skillhome.json 在 skills/<name>/ 内，随目录一起备份。"""
+    items = []
+    if CENTRAL_SKILLS.is_dir():
+        items.append((CENTRAL_SKILLS, "skills"))
+    if CONFIG_PATH.is_file():
+        items.append((CONFIG_PATH, "config.json"))
+    return items
+
+
+def _cloud_backup_dirs():
+    """全部 pre-cloud-sync 备份目录，按时间戳升序（旧 -> 新）。"""
+    if not BACKUP_DIR.is_dir():
+        return []
+    return sorted(d for d in BACKUP_DIR.iterdir()
+                  if d.is_dir() and d.name.startswith(CLOUD_BACKUP_PREFIX))
+
+
+def _cloud_backup_rotate(protect=None):
+    """只保留最近 CLOUD_BACKUP_KEEP 份；protect 指向的目录豁免删除。"""
+    dirs = _cloud_backup_dirs()
+    extra = len(dirs) - CLOUD_BACKUP_KEEP
+    if extra <= 0:
+        return
+    for old in dirs:
+        if extra <= 0:
+            break
+        if protect is not None and old == protect:
+            continue
+        log(f"[cloud] 清理旧备份: {old}")
+        shutil.rmtree(str(old), ignore_errors=True)
+        extra -= 1
+
+
+def _cloud_backup(protect=None):
+    """cloud pull/push/sync 前置备份。成功返回 Path，失败返回 None（须终止同步）。"""
+    t0 = datetime.now()
+    stamp = t0.strftime("%Y%m%d-%H%M%S")
+    dest = BACKUP_DIR / f"{CLOUD_BACKUP_PREFIX}{stamp}"
+    n = 1
+    while dest.exists():
+        n += 1
+        dest = BACKUP_DIR / f"{CLOUD_BACKUP_PREFIX}{stamp}-{n}"
+
+    log(f"[cloud] 备份中... {dest}")
+    try:
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        need = sum(_dir_size(src) for src, _ in _cloud_backup_sources())
+        free = shutil.disk_usage(str(BACKUP_DIR)).free
+        if free < need:
+            log(f"[cloud] 磁盘空间不足：备份约需 {_fmt_size(need)}，"
+                f"可用 {_fmt_size(free)}，已终止同步", "ERROR")
+            return None
+        dest.mkdir()
+        for src, rel in _cloud_backup_sources():
+            target = dest / rel
+            if src.is_dir():
+                shutil.copytree(str(src), str(target), symlinks=True)
+            else:
+                shutil.copy2(str(src), str(target))
+    except KeyboardInterrupt:
+        shutil.rmtree(str(dest), ignore_errors=True)
+        log(f"[cloud] 备份中断，已清理不完整备份: {dest}", "WARN")
+        return None
+    except Exception as e:
+        shutil.rmtree(str(dest), ignore_errors=True)
+        log(f"[cloud] 备份失败，已清理不完整备份 ({e})", "ERROR")
+        return None
+
+    size = _dir_size(dest)
+    elapsed = (datetime.now() - t0).total_seconds()
+    log(f"[cloud] 备份完成: {dest} ({_fmt_size(size)}, {elapsed:.1f}s)", "OK")
+    _cloud_backup_rotate(protect=protect)
+    return dest
+
+
+def _cloud_backups():
+    dirs = _cloud_backup_dirs()
+    if not dirs:
+        print("没有可用备份")
+        print("备份在每次 cloud pull/push/sync 前自动创建，保留最近 "
+              f"{CLOUD_BACKUP_KEEP} 份。")
+        return
+    print(f"可用备份（{BACKUP_DIR}）:")
+    for d in reversed(dirs):  # 新 -> 旧
+        size = _dir_size(d)
+        try:
+            nfiles = sum(1 for f in d.rglob("*") if f.is_file())
+        except OSError:
+            nfiles = 0
+        print(f"  {d.name}   {_fmt_size(size):>10}   {nfiles} 文件")
+    print("\n恢复: skillhome cloud restore <backup-name>")
+
+
+def _cloud_restore(name):
+    if not name:
+        print("用法: skillhome cloud restore <backup-name>")
+        _cloud_backups()
+        return
+    # 只接受 backups/ 下的备份目录名，防止路径穿越
+    if name.startswith("/") or ".." in name or "/" in name or "\\" in name:
+        print(f"非法备份名: {name}")
+        return
+    src = BACKUP_DIR / name
+    if not name.startswith(CLOUD_BACKUP_PREFIX) or not src.is_dir():
+        print(f"备份不存在: {name}")
+        _cloud_backups()
+        return
+
+    # 恢复前先给当前状态做一次安全备份（protect 防止轮转误删 src）
+    log("[cloud] 恢复前备份当前状态...")
+    if _cloud_backup(protect=src) is None:
+        log("[cloud] 当前状态备份失败，已终止恢复", "ERROR")
+        return
+
+    log(f"[cloud] 恢复备份: {src}")
+    bk_skills = src / "skills"
+    if bk_skills.is_dir():
+        staging = HOME_ROOT / (".restore-staging-"
+                               + datetime.now().strftime("%Y%m%d%H%M%S"))
+        if CENTRAL_SKILLS.exists():
+            shutil.move(str(CENTRAL_SKILLS), str(staging))
+        try:
+            shutil.copytree(str(bk_skills), str(CENTRAL_SKILLS), symlinks=True)
+        except Exception as e:
+            shutil.rmtree(str(CENTRAL_SKILLS), ignore_errors=True)
+            if staging.exists():
+                shutil.move(str(staging), str(CENTRAL_SKILLS))
+            log(f"[cloud] skills/ 恢复失败，已回滚原目录 ({e})", "ERROR")
+            return
+        shutil.rmtree(str(staging), ignore_errors=True)
+    else:
+        log("[cloud] 备份中无 skills/，跳过", "WARN")
+
+    bk_cfg = src / "config.json"
+    if bk_cfg.is_file():
+        try:
+            shutil.copy2(str(bk_cfg), str(CONFIG_PATH))
+        except OSError as e:
+            log(f"[cloud] config.json 恢复失败: {e}", "ERROR")
+
+    log(f"[cloud] 恢复完成: {name} -> {HOME_ROOT}", "OK")
+    print("建议运行 `skillhome sync` 刷新各 agent 链接。")
+
+
+def _cloud_snapshot():
+    """中央仓库文件指纹 relpath -> sha256，用于统计同步引起的本地变化。"""
+    snap = {}
+    if not CENTRAL_SKILLS.exists():
+        return snap
+    for f in CENTRAL_SKILLS.rglob("*"):
+        if not f.is_file():
+            continue
+        try:
+            rel = str(f.relative_to(CENTRAL_SKILLS)).replace("\\", "/")
+            snap[rel] = hashlib.sha256(f.read_bytes()).hexdigest()
+        except (PermissionError, OSError):
+            continue
+    return snap
+
+
+def _cloud_report(before, dry):
+    """对比快照，输出 新增/更新/删除/冲突 统计。"""
+    after = _cloud_snapshot()
+    added = sorted(set(after) - set(before))
+    removed = sorted(set(before) - set(after))
+    changed = sorted(k for k in set(before) & set(after)
+                     if before[k] != after[k])
+    conflicts = [k for k in added if "conflict" in Path(k).name.lower()]
+    prefix = "[DRY] " if dry else ""
+    print(f"\n=== {prefix}同步结果（本地侧变化）===")
+    print(f"  新增 {len(added)} | 更新 {len(changed)} | "
+          f"删除 {len(removed)} | 冲突 {len(conflicts)}")
+    for c in conflicts[:10]:
+        print(f"  [conflict] {c}")
+    if len(conflicts) > 10:
+        print(f"  ... 另有 {len(conflicts) - 10} 个冲突文件")
+    if conflicts:
+        print("  冲突方已保留为 *.conflictN，请手动取舍后重新 push。")
+
+
+def _run_bisync(rclone, remote_path, resync=False, dry=False, verbose=False):
+    """执行 rclone bisync，流式透传输出。返回 (ok, captured_lines)。"""
+    supported = _rclone_bisync_flags(rclone)
+
+    def opt(name, *vals):
+        return [f"--{name}"] + [str(v) for v in vals] if name in supported else []
+
+    cmd = [rclone, "bisync", str(CENTRAL_SKILLS), remote_path]
+    cmd += opt("resilient") + opt("recover")
+    cmd += opt("conflict-resolve", "newer")   # 胜者保留原名，败者 -> *.conflictN
+    cmd += opt("conflict-loser", "num")
+    cmd += opt("create-empty-src-dirs")
+    cmd += ["--stats-one-line", "--stats", "10s"]
+    for pat in CLOUD_EXCLUDES:
+        cmd += opt("exclude", pat)
+    if resync:
+        # newer：首次基线/恢复时让较新版本获胜，避免陈旧本地覆盖云端
+        cmd += opt("resync") + opt("resync-mode", "newer")
+    if dry:
+        cmd += opt("dry-run")
+    if verbose:
+        cmd += ["-v"]
+
+    log(f"rclone bisync {CENTRAL_SKILLS} <-> {remote_path}")
+    captured = []
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT,
+                                text=True, errors="replace")
+    except OSError as e:
+        log(f"无法启动 rclone: {e}", "ERROR")
+        return False, captured
+    try:
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            captured.append(line)
+            print(f"  {line}")
+        proc.wait()
+    except KeyboardInterrupt:
+        proc.kill()
+        print("\n已中断。--resilient 状态下重跑即可恢复。")
+        return False, captured
+    return proc.returncode == 0, captured
+
+
+def _cloud_run(mode, args):
+    """pull: bisync -> 本地 sync；push: 本地 sync -> bisync；sync: 两者。"""
+    resync = "--resync" in args
+    dry = "--dry" in args or "--dry-run" in args
+    verbose = "--verbose" in args or "-v" in args
+
+    ready = _cloud_require_ready()
+    if not ready:
+        return
+    cfg, rclone, remote_path = ready
+
+    name = _remote_name_and_path(cfg["cloudRemote"])[0]
+    remotes = _rclone_listremotes(rclone)
+    if remotes is not None and f"{name}:" not in remotes:
+        print(f"rclone 中未注册 remote '{name}:'")
+        print("已配置 remote: " + (", ".join(sorted(remotes)) or "(无)"))
+        print("先运行 `rclone config` 创建，或 `cloud remote set` 改用已有 remote。")
+        return
+
+    init_dirs()
+
+    # 同步前自动备份；备份失败即终止，不允许无备份同步
+    if dry:
+        log("[cloud] dry-run 模式，跳过备份")
+    elif _cloud_backup() is None:
+        return
+
+    if not cfg.get("cloudLastSync") and not resync:
+        log("首次同步，自动建立基线 (--resync --resync-mode newer)")
+        resync = True
+
+    if mode in ("push", "sync"):
+        if cfg.get("agentDirs"):
+            log(f"先收敛本地: skillhome sync (incremental{', dry' if dry else ''})")
+            cmd_sync(dry_run=dry, incremental=True)
+
+    before = _cloud_snapshot()
+    ok, captured = _run_bisync(rclone, remote_path,
+                               resync=resync, dry=dry, verbose=verbose)
+    if not ok:
+        log("rclone bisync 失败，本地链接未刷新", "ERROR")
+        if any("resync" in l for l in captured):
+            print("提示: bisync 要求重建基线，请重跑并显式加 --resync")
+        return
+
+    if not dry:
+        patch_config({"cloudLastSync": datetime.now().isoformat()})
+    _cloud_report(before, dry)
+
+    if mode in ("pull", "sync") and not dry:
+        if cfg.get("agentDirs"):
+            log("刷新本地链接: skillhome sync (incremental)")
+            cmd_sync(incremental=True)
+        else:
+            print("\n云端 skills 已落位中央仓库，但本机尚未发现 agent 目录。")
+            print("运行 `skillhome init && skillhome sync` 完成建链。")
+
+
+def _cloud_remote(rest):
+    if not rest:
+        cfg = load_config() or {}
+        spec = cfg.get("cloudRemote")
+        if spec:
+            _, path = _remote_name_and_path(spec)
+            print(f"cloudRemote:  {spec}  ->  {path}")
+            print(f"cloudEnabled: {cfg.get('cloudEnabled', True)}")
+            print(f"上次同步:     {cfg.get('cloudLastSync') or '从未'}")
+        else:
+            print("未配置 cloudRemote")
+        print("\n用法: skillhome cloud remote set <remote> | unset")
+        print("  set gdrive:        同步到 gdrive:skillhome/skills")
+        print("  set gdrive:mydir   同步到 gdrive:mydir")
+        return
+
+    action = rest[0].lower()
+    if action == "set":
+        if len(rest) < 2 or not rest[1].strip():
+            print("用法: skillhome cloud remote set <remote>")
+            return
+        spec = rest[1].strip()
+        name, path = _remote_name_and_path(spec)
+        patch_config({"cloudRemote": spec, "cloudEnabled": True})
+        print(f"cloudRemote = {spec}  ->  同步路径 {path}")
+        rclone = _rclone_bin()
+        if rclone:
+            remotes = _rclone_listremotes(rclone)
+            if remotes is not None and f"{name}:" not in remotes:
+                print(f"注意: rclone 尚未注册 '{name}:'，先 `rclone config` 创建")
+        else:
+            _rclone_install_hint()
+        print("下一步: skillhome cloud pull")
+    elif action == "unset":
+        patch_config({"cloudEnabled": False, "cloudLastSync": None},
+                     deletes=("cloudRemote",))
+        print("已清除 cloudRemote，云同步停用（本地功能不受影响）")
+    else:
+        print("用法: skillhome cloud remote [set <remote> | unset]")
+
+
+def _cloud_status():
+    print("SkillHome 云同步状态")
+    rclone = _rclone_bin()
+    if rclone:
+        ver = ""
+        try:
+            r = subprocess.run([rclone, "version"],
+                               capture_output=True, text=True, timeout=15)
+            if r.stdout:
+                ver = r.stdout.splitlines()[0].strip()
+        except Exception:
+            pass
+        print(f"  rclone:       {rclone}  ({ver})" if ver else f"  rclone:       {rclone}")
+    else:
+        print("  rclone:       未安装")
+        _rclone_install_hint()
+
+    cfg = load_config() or {}
+    spec = cfg.get("cloudRemote")
+    print(f"  cloudRemote:  {spec or '(未配置)'}")
+    if spec:
+        name, path = _remote_name_and_path(spec)
+        print(f"  同步路径:     {path}")
+        print(f"  cloudEnabled: {cfg.get('cloudEnabled', True)}")
+        print(f"  上次同步:     {cfg.get('cloudLastSync') or '从未（首次自动 --resync）'}")
+        if rclone:
+            remotes = _rclone_listremotes(rclone)
+            if remotes is None:
+                print("  remote 注册:  无法查询（rclone listremotes 失败）")
+            elif f"{name}:" in remotes:
+                print(f"  remote 注册:  {name}: OK")
+            else:
+                print(f"  remote 注册:  {name}: 未注册！已有: "
+                      + (", ".join(sorted(remotes)) or "(无)"))
+                print("               运行 `rclone config` 创建该 remote")
+
+    n_conflicts = 0
+    if CENTRAL_SKILLS.exists():
+        try:
+            n_conflicts = sum(
+                1 for f in CENTRAL_SKILLS.rglob("*")
+                if f.is_file() and "conflict" in f.name.lower())
+        except (PermissionError, OSError):
+            pass
+    print(f"  本地冲突文件: {n_conflicts}")
+    print(f"  中央仓库:     {CENTRAL_SKILLS}")
+    if not spec:
+        print("\n启用: skillhome cloud remote set <remote>")
+
+
+def _cloud_help():
+    print("""
+  skillhome cloud status                     云同步状态（rclone / remote / 上次同步）
+  skillhome cloud remote                     查看当前 remote
+  skillhome cloud remote set <name>          设置 remote（gdrive: -> gdrive:skillhome/skills）
+  skillhome cloud remote unset               清除配置并停用
+  skillhome cloud pull [--resync] [--dry] [-v]   云端 -> 本地（bisync 后刷新链接）
+  skillhome cloud push [--resync] [--dry] [-v]   本地 -> 云端（先收敛本地再 bisync）
+  skillhome cloud sync [--resync] [--dry] [-v]   双向：收敛本地 -> bisync -> 刷新链接
+  skillhome cloud backups                      列出本地备份（保留最近 3 份）
+  skillhome cloud restore <backup-name>        从指定备份恢复 skills/ + config.json
+
+  只同步 ~/.skillhome/skills/；config.json / skillhome.log / backups/ 不上云。
+  冲突文件保留为 *.conflictN。首次同步自动 --resync 建立基线。
+  pull/push/sync 前自动备份到 ~/.skillhome/backups/pre-cloud-sync-<ts>/，
+  备份失败则终止同步；--dry 不改动数据，跳过备份。
+""")
+
+
+def cmd_cloud(args):
+    sub = args[0].lower() if args else "help"
+    if sub in ("help", "-h", "--help"):
+        _cloud_help()
+    elif sub == "status":
+        _cloud_status()
+    elif sub == "remote":
+        _cloud_remote(args[1:])
+    elif sub in ("pull", "push", "sync"):
+        _cloud_run(sub, args[1:])
+    elif sub == "backups":
+        _cloud_backups()
+    elif sub == "restore":
+        _cloud_restore(args[1] if len(args) > 1 else None)
+    else:
+        print(f"未知 cloud 子命令: {sub}")
+        _cloud_help()
+        sys.exit(1)
+
+
+# ============================================================
 # config
 # ============================================================
 def cmd_config():
@@ -1178,6 +1759,11 @@ def cmd_config():
     print(f"  centralSkills: {raw.get('centralSkills')}")
     print(f"  similarityThreshold: {raw.get('similarityThreshold')}")
     print(f"  skipNames: {', '.join(raw.get('skipNames', []))}")
+    spec = raw.get("cloudRemote")
+    print(f"  cloudRemote: {spec or '(未配置)'}")
+    if spec:
+        print(f"  cloudEnabled: {raw.get('cloudEnabled', True)}")
+        print(f"  cloudLastSync: {raw.get('cloudLastSync') or '从未'}")
     print("  agentDirs:")
     for name, path in raw.get("agentDirs", {}).items():
         print(f"    {name}: {path}")
@@ -1201,6 +1787,13 @@ def cmd_help():
     skillhome unlink <skill> <agent>  从 agent 目录移除链接
     skillhome global <skill> [on|off] 设置/取消全局共享
     skillhome add <source> [options]  安装 skill：本地 zip/目录直接入中央仓库，远程源走 npx
+    skillhome sync --cloud      本地同步后接云端双向同步（需先配置 remote）
+    skillhome cloud status      云同步状态（rclone / remote / 上次同步）
+    skillhome cloud remote set|unset <name>  设置/清除 rclone remote
+    skillhome cloud pull|push|sync  云端双向同步（rclone bisync，冲突存为 *.conflictN）
+    skillhome cloud backups     列出同步前自动备份（保留最近 3 份）
+    skillhome cloud restore <name>  从指定备份恢复 skills/ 与 config.json
+    skillhome cloud help        云同步详细用法
     skillhome config            查看当前配置
     skillhome help              显示此帮助
 
@@ -1239,6 +1832,13 @@ def main():
         incremental = "--full" not in args
         verbose = "--verbose" in args
         cmd_sync(dry_run=dry_run, incremental=incremental, verbose=verbose)
+        if "--cloud" in args:
+            cfg = load_config()
+            if cfg and cfg.get("cloudRemote") and cfg.get("cloudEnabled", True):
+                _cloud_run("sync", args)
+            else:
+                print("未配置云同步，已跳过云端步骤")
+                print("启用: skillhome cloud remote set <remote>")
     elif cmd == "status":
         cmd_status()
     elif cmd == "list":
@@ -1259,6 +1859,8 @@ def main():
         cmd_global(skill, action)
     elif cmd == "add":
         cmd_add(args)
+    elif cmd == "cloud":
+        cmd_cloud(args)
     elif cmd == "config":
         cmd_config()
     elif cmd == "help":

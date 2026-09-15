@@ -16,3 +16,5 @@ skills/*
 Thumbs.db
 Desktop.ini
 .DS_Store
+backup/
+agent-prompts/

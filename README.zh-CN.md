@@ -118,6 +118,15 @@ npx skills add Haaaiawd/skillhome -g
 | `skillhome unlink <skill> <agent>` | 从指定 agent 移除某个 skill |
 | `skillhome global <skill> [on\|off]` | 设置/取消全局共享（sync 时自动扩散到所有 agent） |
 | `skillhome add <source> [options]` | 包装 `npx skills add`，安装后自动 sync 到中央 |
+| `skillhome sync --cloud` | 本地同步后接云端双向同步（需先配置 remote） |
+| `skillhome cloud status` | 查看 rclone / remote / 上次同步状态 |
+| `skillhome cloud remote set <name>` | 设置 rclone remote（`gdrive:` → `gdrive:skillhome/skills`） |
+| `skillhome cloud remote unset` | 清除 remote 配置并停用云同步 |
+| `skillhome cloud pull` | 云端 → 本地：`rclone bisync` 后刷新链接 |
+| `skillhome cloud push` | 本地 → 云端：先收敛本地再 `rclone bisync` |
+| `skillhome cloud sync` | 双向：收敛 → bisync → 刷新链接 |
+| `skillhome cloud backups` | 列出本地同步前备份（保留最近 3 份） |
+| `skillhome cloud restore <name>` | 从指定备份恢复 `skills/` + `config.json` |
 | `skillhome config` | 查看当前配置 |
 | `skillhome help` | 显示帮助 |
 
@@ -181,6 +190,45 @@ Agent B 有 "docx"（Gemini 的实现）
 
 两个版本都存活，不丢数据。每个 skill 目录下的 `.skillhome.json` 记录其来源 agent。
 
+## 云同步（可选）
+
+通过 [`rclone`](https://rclone.org) 把中央仓库同步到云端，实现多机共享——支持 Google Drive、Dropbox、OneDrive、S3、SFTP 等 40+ 后端。依然没有守护进程：需要时跑一次 `skillhome cloud sync`。
+
+**一次性配置：**
+
+```bash
+# 1. 安装 rclone（已装可跳过）
+sudo apt install rclone        # Debian/Ubuntu
+brew install rclone            # macOS
+winget install rclone          # Windows
+
+# 2. 创建 remote（以 Google Drive 为例）——浏览器完成 OAuth
+rclone config
+
+# 3. 指向该 remote 并拉取
+skillhome cloud remote set gdrive:
+skillhome cloud pull
+```
+
+`cloud remote set gdrive:` 会把 `~/.skillhome/skills/` 同步到 `gdrive:skillhome/skills`。想自定义目录：`skillhome cloud remote set gdrive:my-backup/skills`。无浏览器的机器可在本机运行 `rclone authorize "drive"`，再把 token 贴回配置。
+
+**日常使用：**
+
+```bash
+skillhome cloud pull     # 拉取云端变更，刷新本地链接
+skillhome cloud push     # 收敛本地 skill，上传变更
+skillhome cloud sync     # 一步完成双向同步
+skillhome cloud status   # rclone / remote / 上次同步状态
+```
+
+- **只同步 `~/.skillhome/skills/`。** `config.json`（本机 agent 路径）、`skillhome.log`、`backups/` 是 `skills/` 的兄弟节点，永远不会上云。
+- **每次同步前自动备份。** `cloud pull`/`push`/`sync` 先把 `skills/`（含每个 skill 的 `.skillhome.json` 元数据）和 `config.json` 复制到 `~/.skillhome/backups/pre-cloud-sync-<YYYYMMDD-HHMMSS>/`。备份失败则终止同步——绝不在无备份的情况下同步。保留最近 3 份，超出自动删除。`--dry` 不改动数据，跳过备份。
+- **恢复：** `skillhome cloud backups` 列出所有备份及大小；`skillhome cloud restore <name>` 恢复 `skills/` 和 `config.json`——恢复前会先备份当前状态，所以恢复本身也可回退。
+- **冲突双保留。** 两台机器改了同一文件时，较新版本保留原名，败者保存为 `*.conflictN`。
+- 首次同步自动建立基线（`--resync`，较新者胜）。若 rclone 之后要求重建基线，运行 `skillhome cloud pull --resync`。
+- 新机器引导：`rclone config` → `skillhome cloud remote set gdrive:` → `skillhome cloud pull` → `skillhome init` → `skillhome sync`。
+- 没装 rclone 或没配 remote？本地功能完全不受影响——cloud 命令是纯增量、可选的。
+
 ## 配置
 
 `~/.skillhome/config.json` 是运行时配置，由 `skillhome init` 自动生成：
@@ -196,11 +244,14 @@ Agent B 有 "docx"（Gemini 的实现）
     "claude": "/home/you/.claude/skills"
   },
   "skipNames": [".system", ".git", ".temp", "_shared"],
-  "similarityThreshold": 0.95
+  "similarityThreshold": 0.95,
+  "cloudRemote": "gdrive:",        // 可选 —— 由 `cloud remote set` 写入
+  "cloudEnabled": true,            // 可选
+  "cloudLastSync": "2026-09-15T10:22:00"  // 可选，自动更新
 }
 ```
 
-编辑 `agentDirs` 可以添加新 agent 或移除不需要管理的。
+编辑 `agentDirs` 可以添加新 agent 或移除不需要管理的。`cloud*` 字段由 `skillhome cloud remote set` 写入，不用云同步可忽略。
 
 ## 平台支持
 

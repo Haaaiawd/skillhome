@@ -76,6 +76,15 @@ python ~/.skillhome/bin/skillhome.py <command>
 | `unlink <skill> <agent>` | Remove link from agent dir (keeps central file) |
 | `global <skill> [on\|off]` | Toggle global sharing flag |
 | `add <source> [opts]` | Install skill: local zip/dir → central repo directly; remote → `npx skills add`; auto-sync |
+| `sync --cloud` | Local sync then cloud bidirectional sync (requires remote) |
+| `cloud status` | Show rclone/remote/last-sync state |
+| `cloud remote set <name>` | Set rclone remote (`gdrive:` → `gdrive:skillhome/skills`) |
+| `cloud remote unset` | Clear remote config and disable cloud sync |
+| `cloud pull` | Cloud → local: `rclone bisync` then refresh links |
+| `cloud push` | Local → cloud: converge locally then `rclone bisync` |
+| `cloud sync` | Both: converge → bisync → refresh links |
+| `cloud backups` | List local pre-sync backups (last 3 kept) |
+| `cloud restore <name>` | Restore `skills/` + `config.json` from a backup |
 | `config` | Show current configuration |
 | `help` | Show help |
 
@@ -125,6 +134,44 @@ discovered. No hardcoded agent names, no special-case paths.
 
 Excluded: VSCode extensions, Trae builtins, Codex `vendor_imports/curated`,
 `node_modules`, cache dirs. These skills belong to the tool, not the user.
+
+## Cloud sync (optional, rclone)
+
+Multi-machine sync of `~/.skillhome/skills/` via `rclone bisync`.
+`config.json`, `skillhome.log`, `backups/` are siblings of `skills/` —
+never uploaded. `.skillhome.json` does sync (`global` flags propagate);
+its `sources` may list agents from other machines — skipped safely at
+link time.
+
+Setup once:
+
+```bash
+rclone config                                  # create remote, e.g. gdrive
+python ~/.skillhome/bin/skillhome.py cloud remote set gdrive:
+python ~/.skillhome/bin/skillhome.py cloud pull
+```
+
+- Requires `rclone` binary; absent/unconfigured → clear error, local
+  features unaffected
+- **Auto-backup before every `cloud pull`/`push`/`sync`**: copies
+  `skills/` (incl. `.skillhome.json` metadata) + `config.json` to
+  `~/.skillhome/backups/pre-cloud-sync-<YYYYMMDD-HHMMSS>/`. Backup
+  failure aborts the sync — never syncs unbacked-up. Last 3 backups
+  kept, older ones auto-deleted. `skillhome.log` and `backups/` itself
+  are excluded. `--dry` skips backup (nothing is modified).
+- Inspect / recover: `cloud backups` lists backups with size;
+  `cloud restore <name>` restores `skills/` and `config.json`
+  (current state is backed up first, and the restored backup is
+  protected from rotation).
+- First sync auto-runs `--resync --resync-mode newer` (newer side wins)
+- Conflicts keep both sides: loser renamed `*.conflictN`
+- `pull` re-materializes links after bisync; pulled skills without
+  metadata default to `global` and fan out to all agents
+- `cloud pull --resync` rebuilds the baseline when bisync demands it
+- Flags: `--dry` preview, `-v` verbose rclone output
+
+New-machine bootstrap: `rclone config` → `cloud remote set` →
+`cloud pull` → `init` → `sync`.
 
 ## link / unlink
 
