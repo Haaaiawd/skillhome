@@ -16,8 +16,10 @@ import platform
 import zipfile
 import tempfile
 import subprocess
+import time
+import urllib.request
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Windows 控制台 UTF-8 输出
 if sys.platform == "win32":
@@ -38,6 +40,8 @@ BIN_DIR = HOME_ROOT / "bin"
 CONFIG_PATH = HOME_ROOT / "config.json"
 LOG_FILE = HOME_ROOT / "skillhome.log"
 BACKUP_DIR = HOME_ROOT / "backups"
+NOTIFY_DIR = HOME_ROOT / "notifications"
+HERMES_ENV_PATH = HOME / ".hermes" / ".env"
 
 DEFAULT_SKIP_NAMES = [".system", ".git", ".temp", "_shared"]
 DEFAULT_SIMILARITY_THRESHOLD = 0.95
@@ -103,19 +107,37 @@ SKILL_MARKERS = ["SKILL.md", ".skill-metadata.yaml"]
 # ============================================================
 # 日志
 # ============================================================
+# 控制台输出按 LOG_LEVEL 过滤；日志文件始终全量写入（事后可诊断）。
+# -v/--verbose -> DEBUG，-q/--quiet -> WARN 及以上。
+LOG_LEVEL = "INFO"
+_LOG_RANK = {"DEBUG": 10, "INFO": 20, "OK": 20, "DRY": 20,
+             "WARN": 30, "ERROR": 40}
+
+
+def _log_file_only(msg, level="INFO"):
+    """只写日志文件，不打印到控制台（用于 rclone 等外部输出留存）。"""
+    try:
+        with LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(f"[{datetime.now().strftime('%H:%M:%S')}][{level}] {msg}\n")
+    except Exception:
+        pass
+
+
 def log(msg, level="INFO"):
-    color = {
-        "WARN": "\033[33m", "ERROR": "\033[31m", "OK": "\033[32m",
-        "DRY": "\033[36m", "INFO": "\033[90m", "DEBUG": "\033[90m",
-    }.get(level, "\033[90m")
-    reset = "\033[0m"
     line = f"[{datetime.now().strftime('%H:%M:%S')}][{level}] {msg}"
-    print(f"{color}{line}{reset}")
     try:
         with LOG_FILE.open("a", encoding="utf-8") as f:
             f.write(line + "\n")
     except Exception:
         pass
+    if _LOG_RANK.get(level, 20) < _LOG_RANK.get(LOG_LEVEL, 20):
+        return
+    color = {
+        "WARN": "\033[33m", "ERROR": "\033[31m", "OK": "\033[32m",
+        "DRY": "\033[36m", "INFO": "\033[90m", "DEBUG": "\033[90m",
+    }.get(level, "\033[90m")
+    reset = "\033[0m"
+    print(f"{color}{line}{reset}")
 
 
 # ============================================================
@@ -175,6 +197,79 @@ def create_link(link: Path, target: Path) -> bool:
             log(f"创建 symlink 失败: {e}", "ERROR")
             return False
     return link.exists()
+
+
+def _is_under(path: Path, root: Path) -> bool:
+    """path 是否位于 root 之下（纯词法比较，不解析 symlink）。"""
+    try:
+        Path(os.path.normpath(str(path))).relative_to(
+            Path(os.path.normpath(str(root))))
+        return True
+    except ValueError:
+        return False
+
+
+def _link_raw_target(child: Path):
+    """symlink 的原始（未解析）目标绝对路径；非 symlink 返回 None。"""
+    if not child.is_symlink():
+        return None
+    try:
+        raw = Path(os.readlink(str(child)))
+    except OSError:
+        return None
+    if raw.is_absolute():
+        return raw
+    return Path(os.path.normpath(str(child.parent / raw)))
+
+
+def _prune_agent_dir(agent_dir: Path, agent_name: str,
+                     skip_names=None, dry_run=False):
+    """清理 agent 目录下的死链，并把绕经其它目录的链式链接重指为中央直链。
+
+    只处理链接，绝不触碰真实目录。返回 (dead_removed, repointed)。
+    """
+    skip = skip_names or DEFAULT_SKIP_NAMES
+    removed = repointed = 0
+    try:
+        children = list(agent_dir.iterdir())
+    except (PermissionError, OSError):
+        return removed, repointed
+    for child in children:
+        if child.name in skip or not is_link(child):
+            continue
+        if not child.exists():
+            # 死链：中央有同名 skill 则重建直链，否则删除
+            central = CENTRAL_SKILLS / child.name
+            if central.is_dir():
+                log(f"[{agent_name}] 修复死链 {child.name} -> 重指中央", "WARN")
+                if not dry_run:
+                    remove_link(child)
+                    create_link(child, central)
+                repointed += 1
+            else:
+                log(f"[{agent_name}] 清理死链 {child.name} "
+                    f"(目标 {os.readlink(str(child)) if child.is_symlink() else '?'} 不存在)",
+                    "WARN")
+                if not dry_run:
+                    remove_link(child)
+                removed += 1
+            continue
+        # 链式链接：最终落在中央但原始目标绕经其它目录（如 .agents/skills）
+        raw = _link_raw_target(child)
+        if raw is None:
+            continue  # junction 或无 readlink，无法判定链条，保持原样
+        try:
+            resolved = Path(os.path.realpath(str(child)))
+        except OSError:
+            continue
+        if (_is_under(resolved, CENTRAL_SKILLS)
+                and not _is_under(raw, CENTRAL_SKILLS)):
+            log(f"[{agent_name}] 链式链接 {child.name} -> 重指 {resolved}", "WARN")
+            if not dry_run:
+                remove_link(child)
+                create_link(child, resolved)
+            repointed += 1
+    return removed, repointed
 
 
 # ============================================================
@@ -316,17 +411,25 @@ def derive_agent_name(path: Path) -> str:
 # ============================================================
 # discover — 自检索扫描
 # ============================================================
-def cmd_discover(force=False, interactive=False):
+def cmd_discover(interactive=False, merge=True, dry_run=False):
+    """扫描发现 skill 目录并写入 config.json。
+
+    merge=True（默认）：保留已配置的 agentDirs，只新增发现的目录；
+    merge=False（--replace）：整体覆盖，恢复旧的 init/discover 行为。
+    返回最终写入（或将写入）的 agentDirs dict；无发现时返回 None。
+    """
     log("=== SkillHome 自检索 ===")
-    init_dirs()
+    if not dry_run:
+        init_dirs()
     found = {}  # ordered: 用 dict 保持插入顺序 (Python 3.7+)
 
-    # 阶段 1：快速探测已知模式
+    # 阶段 1：快速探测已知模式（存在即登记，包括空目录——
+    # 空目录同样是扩散目标，否则新装 agent 永远收不到链接）
     print("  [1/2] 探测已知路径模式...")
 
     for pattern in KNOWN_PATTERNS:
         path = HOME / pattern
-        if is_skill_repo(path):
+        if path.is_dir():
             agent_name = derive_agent_name(path)
             if agent_name in found:
                 # 命名碰撞：用父目录名做后缀
@@ -404,14 +507,14 @@ def cmd_discover(force=False, interactive=False):
 
     if not found:
         print("\n未发现任何 skill 目录")
-        return
+        return None
 
     # 交互模式
     final = {}
     if interactive:
         print("\n确认纳入的目录:")
         for k, v in found.items():
-            resp = input(f"  纳入 {k} => {v}? [Y/n] ").strip()
+            resp = _ask(f"  纳入 {k} => {v}? [Y/n] ")
             if resp.lower() != "n":
                 final[k] = v
     else:
@@ -419,21 +522,38 @@ def cmd_discover(force=False, interactive=False):
 
     if not final:
         print("未选择任何目录")
-        return
+        return None
 
-    # 保留已有配置的 skipNames 和 threshold
-    existing = None
-    if not force and CONFIG_PATH.exists():
-        existing = load_config()
-
+    # 保留已有配置的 skipNames 和 threshold；merge 模式下同时保留 agentDirs
+    existing = load_config() if CONFIG_PATH.exists() else None
     skip_names = existing.get("skipNames") if existing else DEFAULT_SKIP_NAMES
     threshold = existing.get("similarityThreshold") if existing else DEFAULT_SIMILARITY_THRESHOLD
+
+    if merge and existing:
+        merged = dict(existing.get("agentDirs", {}))
+        added = []
+        for k, v in final.items():
+            if k in merged and merged[k] != v:
+                print(f"  [保留] {k} 已配置为 {merged[k]}，忽略新发现 {v}")
+                continue
+            if k not in merged:
+                added.append(k)
+            merged[k] = v
+        if added:
+            print(f"  [merge] 新增 {len(added)} 个目录: {', '.join(added)}")
+        print(f"  [merge] 保留已配置 {len(existing.get('agentDirs', {}))} 个目录")
+        final = merged
+
+    if dry_run:
+        print(f"\n[DRY] 将写入 {len(final)} 个 skill 目录到 config.json（预览，未写入）")
+        return final
 
     save_config(final, skip_names, threshold)
     print(f"\n=== 完成 ===")
     print(f"发现 {len(final)} 个 skill 目录，已写入 config.json")
     print(f"  {CONFIG_PATH}")
     print(f"\n下一步: skillhome sync")
+    return final
 
 
 def walk_dirs(root: Path, max_depth=3):
@@ -543,17 +663,21 @@ def _next_backup_path(name: str) -> Path:
 # ============================================================
 # sync — 核心同步逻辑
 # ============================================================
-def cmd_sync(dry_run=False, incremental=True, verbose=False):
+def cmd_sync(dry_run=False, incremental=True, verbose=False, prune=False):
     cfg = load_config()
     if not cfg:
         print("config.json 不存在，请先运行: skillhome init")
-        return
+        return None
 
     agent_dirs = cfg.get("agentDirs", {})
     skip_names = cfg.get("skipNames", DEFAULT_SKIP_NAMES)
     threshold = cfg.get("similarityThreshold", DEFAULT_SIMILARITY_THRESHOLD)
 
-    log(f"=== SkillHome 同步开始 (mode: {'incremental' if incremental else 'full'}) ===")
+    report = {"migrated": 0, "created": 0, "skipped": 0,
+              "pruned": 0, "repointed": 0, "conflicts": 0, "reals_left": 0}
+
+    log(f"=== SkillHome 同步开始 (mode: {'incremental' if incremental else 'full'}"
+        f"{', dry-run' if dry_run else ''}{', prune' if prune else ''}) ===")
 
     # 阶段 1：扫描
     skill_registry = {}  # name -> {real_locations, link_locations, real_paths}
@@ -634,6 +758,7 @@ def cmd_sync(dry_run=False, incremental=True, verbose=False):
             src_agent = real_agents[0]
             src_path = Path(info["real_paths"][src_agent])
             log(f"{sname} : 迁移 ({src_agent} -> central)")
+            report["migrated"] += 1
             if not dry_run:
                 shutil.move(str(src_path), str(central_existing))
             central_path_of[sname] = central_existing
@@ -688,6 +813,7 @@ def cmd_sync(dry_run=False, incremental=True, verbose=False):
                     suffixed = f"{sname}--{src_agent}"
                     suffixed_central = CENTRAL_SKILLS / suffixed
                     log(f"{sname} : 相似度不足，保留为 {suffixed}")
+                    report["conflicts"] += 1
                     if not dry_run:
                         shutil.move(str(src_path), str(suffixed_central))
                     central_path_of[suffixed] = suffixed_central
@@ -727,6 +853,7 @@ def cmd_sync(dry_run=False, incremental=True, verbose=False):
                     suffixed = f"{sname}--{other}"
                     suffixed_central = CENTRAL_SKILLS / suffixed
                     log(f"  保留为独立条目: {suffixed}")
+                    report["conflicts"] += 1
                     if not dry_run:
                         shutil.move(str(other_path), str(suffixed_central))
                     central_path_of[suffixed] = suffixed_central
@@ -736,6 +863,7 @@ def cmd_sync(dry_run=False, incremental=True, verbose=False):
 
             merged_path = Path(info["real_paths"][merged_agent])
             log(f"{sname} : 合并完成，主来源 {merged_agent}")
+            report["migrated"] += 1
             if not dry_run:
                 shutil.move(str(merged_path), str(central_existing))
                 for a in real_agents:
@@ -757,6 +885,20 @@ def cmd_sync(dry_run=False, incremental=True, verbose=False):
 
     # 阶段 3：链接管理
     log("=== 阶段 3: 链接管理 ===")
+
+    if prune:
+        for agent_name, agent_dir_str in agent_dirs.items():
+            agent_dir = Path(agent_dir_str)
+            if not agent_dir.is_dir():
+                continue
+            removed, repointed = _prune_agent_dir(
+                agent_dir, agent_name, skip_names=skip_names, dry_run=dry_run)
+            report["pruned"] += removed
+            report["repointed"] += repointed
+        if report["pruned"] or report["repointed"]:
+            log(f"链接清理: 死链 {report['pruned']} 条 | 重指 {report['repointed']} 条")
+        else:
+            log("链接清理: 无死链/链式链接", "DEBUG")
 
     if incremental:
         for sname in sorted(skill_distribution.keys()):
@@ -782,8 +924,11 @@ def cmd_sync(dry_run=False, incremental=True, verbose=False):
                 link_path = agent_dir / sname
                 if not link_path.exists() and not link_path.is_symlink():
                     log(f"[{agent_name}] 创建缺失链接: {sname}")
+                    report["created"] += 1
                     if not dry_run:
                         create_link(link_path, cpath)
+                else:
+                    report["skipped"] += 1
     else:
         # 完整模式：先删旧链接，再重建
         for agent_name, agent_dir_str in agent_dirs.items():
@@ -822,6 +967,7 @@ def cmd_sync(dry_run=False, incremental=True, verbose=False):
                     continue
                 link_path = agent_dir / sname
                 log(f"[{agent_name}] 创建链接: {sname}")
+                report["created"] += 1
                 if not dry_run:
                     create_link(link_path, cpath)
 
@@ -873,7 +1019,12 @@ def cmd_sync(dry_run=False, incremental=True, verbose=False):
                         real_count += 1
         except (PermissionError, OSError):
             continue
+    report["reals_left"] = real_count
     log(f"=== 完成 | 中央 skill: {len(skill_distribution)} | 残留真实目录: {real_count} ===", "OK")
+    log(f"同步报告: 迁移 {report['migrated']} | 新建链接 {report['created']} | "
+        f"已有(跳过) {report['skipped']} | 死链清理 {report['pruned']} | "
+        f"链式重指 {report['repointed']} | 冲突变体 {report['conflicts']}", "OK")
+    return report
 
 
 # ============================================================
@@ -1325,6 +1476,437 @@ def _cloud_require_ready():
     return cfg, rclone, remote_path
 
 
+# ============================================================
+# install — 注册全局命令
+# ============================================================
+def _shim_path() -> Path:
+    """全局命令 shim 的安装位置。"""
+    if IS_WINDOWS:
+        return HOME / "bin" / "skillhome.cmd"
+    return HOME / ".local" / "bin" / "skillhome"
+
+
+def _detect_shell_rc():
+    """按 $SHELL 推断 rc 文件；fish/未知返回 None（只给提示不改文件）。"""
+    shell = os.path.basename(os.environ.get("SHELL", ""))
+    if shell == "zsh":
+        return HOME / ".zshrc"
+    if shell == "bash":
+        return HOME / ".bashrc"
+    if shell in ("sh", "dash", "ksh"):
+        return HOME / ".profile"
+    return None
+
+
+def cmd_install(dry_run=False):
+    """注册 skillhome 全局命令（幂等，可重复跑）。
+
+    1) 把当前脚本物化到 ~/.skillhome/bin/skillhome.py（文档化路径）
+    2) 写 ~/.local/bin/skillhome shim（Windows: %USERPROFILE%\\bin\\skillhome.cmd）
+    3) shim 目录不在 PATH 时，追加 export 到 shell rc
+    """
+    log("=== SkillHome install ===")
+    script_src = Path(__file__).resolve()
+    installed = BIN_DIR / "skillhome.py"
+
+    if script_src == installed:
+        log(f"脚本已在位: {installed}")
+    elif dry_run:
+        log(f"[DRY] 物化脚本 {script_src} -> {installed}", "DRY")
+    else:
+        init_dirs()
+        shutil.copy2(str(script_src), str(installed))
+        log(f"脚本已物化: {installed}", "OK")
+
+    shim = _shim_path()
+    if IS_WINDOWS:
+        content = f'@echo off\r\npython "{script_src}" %*\r\n'
+    else:
+        content = (
+            "#!/bin/sh\n"
+            "# SkillHome global wrapper\n"
+            f'if [ -f "{script_src}" ]; then\n'
+            f'  exec python3 "{script_src}" "$@"\n'
+            "fi\n"
+            'exec python3 "$HOME/.skillhome/bin/skillhome.py" "$@"\n'
+        )
+
+    existing_cmd = shutil.which("skillhome")
+    if existing_cmd:
+        try:
+            other = Path(existing_cmd).resolve() != shim.resolve()
+        except OSError:
+            other = True
+        if other:
+            log(f"PATH 中已有其他 skillhome 命令: {existing_cmd}（不覆盖，仅写本工具 shim）",
+                "WARN")
+
+    if shim.exists():
+        try:
+            if shim.read_text(encoding="utf-8") == content:
+                log(f"shim 已是最新: {shim}")
+                content = None
+        except OSError:
+            pass
+    if content is not None:
+        if dry_run:
+            log(f"[DRY] 写入 shim: {shim}", "DRY")
+        else:
+            shim.parent.mkdir(parents=True, exist_ok=True)
+            shim.write_text(content, encoding="utf-8")
+            if not IS_WINDOWS:
+                shim.chmod(0o755)
+            log(f"全局命令已安装: {shim}", "OK")
+
+    # PATH：shim 目录不在 PATH 时追加到 shell rc（不去重 PATH 自身）
+    if IS_WINDOWS:
+        if str(shim.parent).lower() not in os.environ.get("PATH", "").lower():
+            print(f"提示: 将 {shim.parent} 加入用户 PATH 后可直接使用 skillhome")
+        return
+    path_dirs = os.environ.get("PATH", "").split(os.pathsep)
+    if str(shim.parent) in path_dirs:
+        log(f"{shim.parent} 已在 PATH 中")
+        return
+    rc = _detect_shell_rc()
+    export_line = f'export PATH="{shim.parent}:$PATH"'
+    if rc is None:
+        print(f"提示: {shim.parent} 不在 PATH。请自行加入 shell 配置：")
+        print(f"  {export_line}")
+        return
+    if dry_run:
+        log(f"[DRY] 将追加 PATH 到 {rc}", "DRY")
+        return
+    try:
+        existing = rc.read_text(encoding="utf-8") if rc.exists() else ""
+        if str(shim.parent) in existing:
+            log(f"{rc} 已包含 {shim.parent}，跳过")
+        else:
+            with rc.open("a", encoding="utf-8") as f:
+                f.write(f"\n# Added by skillhome install\n{export_line}\n")
+            log(f"已将 {shim.parent} 写入 PATH: {rc}", "OK")
+    except OSError as e:
+        print(f"写入 {rc} 失败: {e}")
+        print(f"请手动加入: {export_line}")
+    print(f"当前会话立即生效: {export_line}")
+
+
+# ============================================================
+# doctor — 一键体检
+# ============================================================
+def _agent_dir_health(agent_dir: Path, skip_names):
+    """统计 agent 目录的链接健康度。
+
+    返回 dict: links/reals/dead/chained/external/missing。
+    chained = 最终落在中央但原始目标绕经其它目录（应重指为直链）。
+    external = 指向中央仓库之外的链接（可能是用户自建，只报告不动）。
+    """
+    h = {"links": 0, "reals": 0, "dead": 0, "chained": 0,
+         "external": 0, "missing": not agent_dir.is_dir(),
+         "dead_names": [], "chained_names": [], "external_names": []}
+    if h["missing"]:
+        return h
+    try:
+        children = [c for c in agent_dir.iterdir()
+                    if c.name not in skip_names]
+    except (PermissionError, OSError):
+        return h
+    for child in children:
+        if not child.is_dir() and not child.is_symlink():
+            continue
+        if not is_link(child):
+            if child.is_dir():
+                h["reals"] += 1
+            continue
+        h["links"] += 1
+        if not child.exists():
+            h["dead"] += 1
+            h["dead_names"].append(child.name)
+            continue
+        raw = _link_raw_target(child)
+        try:
+            resolved = Path(os.path.realpath(str(child)))
+        except OSError:
+            resolved = None
+        if resolved is None:
+            continue
+        if _is_under(resolved, CENTRAL_SKILLS):
+            if raw is not None and not _is_under(raw, CENTRAL_SKILLS):
+                h["chained"] += 1
+                h["chained_names"].append(child.name)
+        else:
+            h["external"] += 1
+            h["external_names"].append(child.name)
+    return h
+
+
+def cmd_doctor(args):
+    fix = "--fix" in args
+    issues = []
+
+    def check(ok, ok_msg, bad_msg):
+        print(f"  [{'OK' if ok else '!!'}] {ok_msg if ok else bad_msg}")
+        if not ok:
+            issues.append(bad_msg)
+        return ok
+
+    print("=== SkillHome doctor ===\n")
+
+    # -- 安装状态 --
+    print("[安装]")
+    installed_py = BIN_DIR / "skillhome.py"
+    check(installed_py.is_file(),
+          f"脚本已物化: {installed_py}",
+          f"~/.skillhome/bin/ 无脚本 -> 运行 skillhome install")
+    shim = _shim_path()
+    on_path = shutil.which("skillhome")
+    if not shim.exists():
+        check(False, "", f"全局 shim 缺失: {shim} -> 运行 skillhome install")
+    elif not on_path:
+        check(False, "", f"shim 存在但 {shim.parent} 不在 PATH")
+    else:
+        check(str(Path(on_path).resolve()) == str(shim.resolve())
+              or str(on_path) == str(shim),
+              f"全局命令: {on_path}",
+              f"PATH 中的 skillhome 指向其他位置: {on_path}")
+
+    # -- 配置 --
+    print("\n[配置]")
+    cfg = load_config()
+    if not check(cfg is not None,
+                 f"config.json 正常（{CONFIG_PATH}）",
+                 "config.json 缺失或损坏 -> 运行 skillhome init"):
+        print(f"\n共发现 {len(issues)} 个问题")
+        return
+    agent_dirs = cfg.get("agentDirs", {})
+    check(bool(agent_dirs), f"agentDirs: {len(agent_dirs)} 个",
+          "agentDirs 为空 -> 运行 skillhome discover")
+    skip_names = cfg.get("skipNames", DEFAULT_SKIP_NAMES)
+
+    # -- 中央仓库 --
+    print("\n[中央仓库]")
+    if CENTRAL_SKILLS.is_dir():
+        n = sum(1 for d in CENTRAL_SKILLS.iterdir() if d.is_dir())
+        check(True, f"{CENTRAL_SKILLS} ({n} skills)", "")
+    else:
+        check(False, "", f"中央仓库不存在: {CENTRAL_SKILLS}")
+
+    # -- agent 目录健康 --
+    print("\n[agent 目录]")
+    totals = {"dead": 0, "chained": 0, "external": 0,
+              "reals": 0, "missing": 0}
+    for name, dstr in agent_dirs.items():
+        d = Path(dstr)
+        h = _agent_dir_health(d, skip_names)
+        for k in totals:
+            totals[k] += h[k]
+        if h["missing"]:
+            check(False, "", f"{name}: 目录不存在 {d}")
+        elif h["dead"] or h["chained"]:
+            check(False, "",
+                  f"{name}: 死链 {h['dead']} | 链式 {h['chained']}"
+                  f" | 外部 {h['external']} | 残留真实 {h['reals']}"
+                  f"  (例: {', '.join((h['dead_names'] + h['chained_names'])[:5])})")
+        else:
+            check(True,
+                  f"{name}: links={h['links']} reals={h['reals']} external={h['external']}",
+                  "")
+    check(totals["dead"] == 0, "无死链",
+          f"共 {totals['dead']} 条死链 -> skillhome sync --prune 或 doctor --fix")
+    check(totals["chained"] == 0, "无链式链接",
+          f"共 {totals['chained']} 条链式链接（绕经非中央路径）-> doctor --fix 重指直链")
+    check(totals["reals"] == 0, "无残留真实目录",
+          f"共 {totals['reals']} 个残留真实目录 -> skillhome sync")
+
+    # -- 未登记的已知目录 --
+    registered = set(agent_dirs.values())
+    unreg = [p for p in KNOWN_PATTERNS
+             if (HOME / p).is_dir() and str(HOME / p) not in registered]
+    if unreg:
+        print(f"\n[提示] {len(unreg)} 个已知目录存在但未登记（可能是空目录）:")
+        for p in unreg[:8]:
+            print(f"  {HOME / p}")
+        print("  需要纳入扩散: skillhome discover")
+
+    # -- 云同步 --
+    print("\n[云同步]")
+    rclone = _rclone_bin()
+    check(rclone is not None, f"rclone: {rclone}", "rclone 未安装（云同步不可用）")
+    spec = cfg.get("cloudRemote")
+    if spec:
+        name, rpath = _remote_name_and_path(spec)
+        check(True, f"cloudRemote: {spec} -> {rpath}", "")
+        if rclone:
+            remotes = _rclone_listremotes(rclone)
+            if remotes is not None:
+                check(f"{name}:" in remotes, f"remote '{name}:' 已注册",
+                      f"remote '{name}:' 未在 rclone 注册 -> rclone config")
+        last = cfg.get("cloudLastSync")
+        if last:
+            try:
+                age = datetime.now() - datetime.fromisoformat(last)
+                ok = age.days < 7
+                check(ok, f"上次同步: {last[:19]} ({age.days} 天前)",
+                      f"上次同步: {last[:19]} ({age.days} 天前，建议 cloud sync)")
+            except ValueError:
+                check(True, f"上次同步: {last}", "")
+        else:
+            check(False, "", "cloudLastSync 从未写入（bisync 尚未成功过）")
+    else:
+        print("  [--] 未配置 cloudRemote（可选）: skillhome cloud remote set <name>")
+
+    print(f"\n共发现 {len(issues)} 个问题" if issues else "\n体检通过，未发现问题")
+    if issues and not fix:
+        print("修复: skillhome doctor --fix（死链/链式链接/缺失 shim）")
+
+    if fix:
+        print("\n-- 修复 --")
+        if not installed_py.is_file() or not shim.exists():
+            cmd_install()
+        removed = repointed = 0
+        for name, dstr in agent_dirs.items():
+            d = Path(dstr)
+            if not d.is_dir():
+                continue
+            r, p = _prune_agent_dir(d, name, skip_names=skip_names)
+            removed += r
+            repointed += p
+        log(f"doctor --fix: 清理死链 {removed} | 重指 {repointed}", "OK")
+        if removed or repointed:
+            print("已修复链接问题。建议再跑: skillhome sync")
+
+
+# ============================================================
+# init — 五步编排
+# ============================================================
+def _ask(prompt: str) -> str:
+    try:
+        return input(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return ""
+
+
+def _confirm(prompt: str, default=True) -> bool:
+    suffix = "[Y/n]" if default else "[y/N]"
+    resp = _ask(f"{prompt} {suffix} ").lower()
+    if not resp:
+        return default
+    return resp not in ("n", "no")
+
+
+def _quick_register_known_dirs():
+    """兜底：把已存在的已知 agent 目录登记进 agentDirs（不深度扫描）。
+
+    ~/.agents/skills 与 ~/.hermes/skills 在其父目录存在但 skills/ 缺失时
+    补建——这两个是 Hermes 的标准读取目录。返回新增 agent 名列表。
+    """
+    cfg = load_config() or _config_scaffold()
+    agent_dirs = dict(cfg.get("agentDirs") or {})
+    added = []
+    for pattern in KNOWN_PATTERNS:
+        path = HOME / pattern
+        if not path.is_dir() or str(path) in agent_dirs.values():
+            continue
+        name = derive_agent_name(path)
+        if name in agent_dirs:
+            name = f"{name}-{path.parent.name}".lstrip(".")
+        if name in agent_dirs:
+            continue
+        agent_dirs[name] = str(path)
+        added.append(name)
+    for base in (HOME / ".agents", HOME / ".hermes"):
+        skills_dir = base / "skills"
+        if base.is_dir() and not skills_dir.exists():
+            try:
+                skills_dir.mkdir()
+                if str(skills_dir) not in agent_dirs.values():
+                    agent_dirs[derive_agent_name(skills_dir)] = str(skills_dir)
+                    added.append(skills_dir.parent.name.lstrip("."))
+            except OSError:
+                pass
+    if added:
+        patch_config({"agentDirs": agent_dirs})
+    return added
+
+
+def cmd_init(args):
+    """五步编排：install -> discover -> remote picker -> first pull -> sync。"""
+    dry = "--dry" in args or "--dry-run" in args
+    yes = "-y" in args or "--yes" in args
+    no_cloud = "--no-cloud" in args
+    interactive = sys.stdin.isatty() and not yes
+
+    print("=== SkillHome init ===" + ("  [DRY-RUN 预览]" if dry else ""))
+
+    print("\n[1/5] 注册全局命令 ...")
+    cmd_install(dry_run=dry)
+
+    print("\n[2/5] 发现 skill 目录 ...")
+    cmd_discover(interactive=interactive, merge=True, dry_run=dry)
+
+    print("\n[3/5] 云同步 remote ...")
+    cfg = load_config() or {}
+    if no_cloud:
+        print("  已跳过 (--no-cloud)")
+    elif cfg.get("cloudRemote") and not dry:
+        print(f"  已配置: {cfg['cloudRemote']}")
+    else:
+        rclone = _rclone_bin()
+        if not rclone:
+            print("  未安装 rclone，跳过云同步配置（本地功能不受影响）")
+        else:
+            remotes = _rclone_listremotes(rclone) or set()
+            if not remotes:
+                print("  rclone 无已注册 remote，跳过（先运行 rclone config）")
+            elif dry:
+                print(f"  [DRY] 可选 remote: {', '.join(sorted(remotes))}")
+            elif len(remotes) == 1:
+                pick = next(iter(remotes))
+                if yes or (sys.stdin.isatty()
+                           and _confirm(f"  使用 remote {pick} ?", True)):
+                    patch_config({"cloudRemote": pick, "cloudEnabled": True})
+                    print(f"  cloudRemote = {pick}")
+                else:
+                    print(f"  跳过，稍后可运行: skillhome cloud remote set {pick}")
+            else:
+                rl = sorted(remotes)
+                print("  可用 remote:")
+                for i, r in enumerate(rl):
+                    print(f"    [{i + 1}] {r}")
+                choice = _ask("  选择编号 (回车跳过): ")
+                if choice.isdigit() and 1 <= int(choice) <= len(rl):
+                    pick = rl[int(choice) - 1]
+                    patch_config({"cloudRemote": pick, "cloudEnabled": True})
+                    print(f"  cloudRemote = {pick}")
+                else:
+                    print("  跳过，稍后可运行: skillhome cloud remote set <name>")
+
+    print("\n[4/5] 首次云端拉取 ...")
+    cfg = load_config() or {}
+    if no_cloud or not cfg.get("cloudRemote"):
+        print("  跳过（未配置 remote）")
+    elif dry:
+        print("  [DRY] 将执行: skillhome cloud pull（含自动扩散）")
+    elif yes:
+        _cloud_run("pull", [])
+    elif sys.stdin.isatty() and _confirm("  现在从云端拉取 skills? ", True):
+        _cloud_run("pull", [])
+    else:
+        # 非交互环境不自动触发网络操作；需显式 -y
+        print("  跳过，稍后可运行: skillhome cloud pull")
+
+    print("\n[5/5] 本地收敛 + 扩散 ...")
+    report = cmd_sync(dry_run=dry, incremental=True)
+
+    print("\n=== init 完成 ===" + ("  [DRY-RUN，未做任何改动]" if dry else ""))
+    if report:
+        print(f"  中央 skill: 见上方 | 新建链接 {report['created']} | "
+              f"残留真实目录 {report['reals_left']}")
+    print("  常用命令: skillhome status | skillhome doctor | skillhome sync")
+    if (load_config() or {}).get("cloudRemote"):
+        print("  云同步:   skillhome cloud sync")
+
+
 # ------------------------------------------------------------
 # cloud 前置自动备份
 # ------------------------------------------------------------
@@ -1507,7 +2089,12 @@ def _cloud_restore(name):
             log(f"[cloud] config.json 恢复失败: {e}", "ERROR")
 
     log(f"[cloud] 恢复完成: {name} -> {HOME_ROOT}", "OK")
-    print("建议运行 `skillhome sync` 刷新各 agent 链接。")
+    cfg = load_config()
+    if cfg and cfg.get("agentDirs"):
+        log("[cloud] 恢复后自动扩散 ...")
+        cmd_sync(incremental=True)
+    else:
+        print("建议运行 `skillhome init` 发现 agent 目录后扩散。")
 
 
 def _cloud_snapshot():
@@ -1583,19 +2170,27 @@ def _run_bisync(rclone, remote_path, resync=False, dry=False, verbose=False):
             line = line.rstrip("\n")
             captured.append(line)
             print(f"  {line}")
+            _log_file_only(line, "RCLONE")
         proc.wait()
     except KeyboardInterrupt:
         proc.kill()
         print("\n已中断。--resilient 状态下重跑即可恢复。")
         return False, captured
-    return proc.returncode == 0, captured
+    ok = proc.returncode == 0
+    _log_file_only(f"bisync exit={proc.returncode} ok={ok}", "RCLONE")
+    return ok, captured
 
 
 def _cloud_run(mode, args):
-    """pull: bisync -> 本地 sync；push: 本地 sync -> bisync；sync: 两者。"""
+    """pull: bisync -> 本地 sync；push: 本地 sync -> bisync；sync: 两者。
+
+    pull/sync 成功后默认自动扩散到各 agent 目录（--no-fanout 关闭）；
+    --dry 时扩散也以 dry-run 预览，不做任何改动。
+    """
     resync = "--resync" in args
     dry = "--dry" in args or "--dry-run" in args
     verbose = "--verbose" in args or "-v" in args
+    no_fanout = "--no-fanout" in args
 
     ready = _cloud_require_ready()
     if not ready:
@@ -1631,22 +2226,44 @@ def _cloud_run(mode, args):
     ok, captured = _run_bisync(rclone, remote_path,
                                resync=resync, dry=dry, verbose=verbose)
     if not ok:
-        log("rclone bisync 失败，本地链接未刷新", "ERROR")
-        if any("resync" in l for l in captured):
-            print("提示: bisync 要求重建基线，请重跑并显式加 --resync")
+        log("rclone bisync 失败，本地链接未刷新（rclone 输出见 skillhome.log）",
+            "ERROR")
+        print("\n修复指引（按情况三选一）:")
+        print("  1) 直接重跑同一命令（--resilient 可续传）")
+        print("  2) 若要求重建基线: 重跑并显式加 --resync")
+        print("  3) 若本地已损坏: skillhome cloud backups 查看备份，"
+              "cloud restore <name> 恢复")
         return
 
     if not dry:
         patch_config({"cloudLastSync": datetime.now().isoformat()})
     _cloud_report(before, dry)
 
-    if mode in ("pull", "sync") and not dry:
-        if cfg.get("agentDirs"):
-            log("刷新本地链接: skillhome sync (incremental)")
-            cmd_sync(incremental=True)
+    # 自动扩散：pull/sync 成功后把中央 skills 链接到各 agent 目录
+    if mode in ("pull", "sync"):
+        if no_fanout:
+            log("[cloud] 跳过自动扩散 (--no-fanout)")
         else:
-            print("\n云端 skills 已落位中央仓库，但本机尚未发现 agent 目录。")
-            print("运行 `skillhome init && skillhome sync` 完成建链。")
+            if not cfg.get("agentDirs"):
+                # 兜底：快速登记已知目录（含 ~/.agents/skills、~/.hermes/skills）
+                added = _quick_register_known_dirs()
+                if added:
+                    log(f"[cloud] 兜底登记 {len(added)} 个 agent 目录: "
+                        f"{', '.join(added)}")
+                    cfg = load_config() or cfg
+            if cfg.get("agentDirs"):
+                log(f"[cloud] 自动扩散到 agent 目录"
+                    f"{'（dry 预览）' if dry else ''} ...")
+                report = cmd_sync(dry_run=dry, incremental=True)
+                if report:
+                    log("[cloud] 扩散完成: "
+                        f"新建链接 {report['created']} | "
+                        f"已有 {report['skipped']} | "
+                        f"冲突 {report['conflicts']} | "
+                        f"残留真实 {report['reals_left']}", "OK")
+            else:
+                print("\n云端 skills 已落位中央仓库，但本机尚未发现 agent 目录。")
+                print("运行 `skillhome init` 完成建链。")
 
 
 def _cloud_remote(rest):
@@ -1746,9 +2363,9 @@ def _cloud_help():
   skillhome cloud remote                     查看当前 remote
   skillhome cloud remote set <name>          设置 remote（gdrive: -> gdrive:skillhome/skills）
   skillhome cloud remote unset               清除配置并停用
-  skillhome cloud pull [--resync] [--dry] [-v]   云端 -> 本地（bisync 后刷新链接）
+  skillhome cloud pull [--resync] [--dry] [-v] [--no-fanout]   云端 -> 本地（bisync 后自动扩散）
   skillhome cloud push [--resync] [--dry] [-v]   本地 -> 云端（先收敛本地再 bisync）
-  skillhome cloud sync [--resync] [--dry] [-v]   双向：收敛本地 -> bisync -> 刷新链接
+  skillhome cloud sync [--resync] [--dry] [-v] [--no-fanout]   双向：收敛 -> bisync -> 扩散
   skillhome cloud backups                      列出本地备份（保留最近 3 份）
   skillhome cloud restore <backup-name>        从指定备份恢复 skills/ + config.json
 
@@ -1811,10 +2428,13 @@ def cmd_help():
   SkillHome — 跨 Agent 统一 Skill 管理（Python 单文件，三平台）
 
   命令:
-    skillhome init              首次初始化：自动扫描发现 skill 目录，生成 config.json
-    skillhome discover          重新扫描发现 skill 目录
-    skillhome sync              手动触发增量同步
+    skillhome init              首次初始化五步编排：install → discover → remote → pull → sync
+                                (-y 全自动 | --no-cloud 跳过云端 | --dry-run 预览)
+    skillhome install           注册全局命令：物化脚本 + 写 ~/.local/bin/skillhome + 配 PATH
+    skillhome discover          重新扫描发现 skill 目录（默认 merge；--replace 覆盖；-i 逐条确认）
+    skillhome sync              手动触发增量同步（--dry-run 预览 | --prune 清理死链）
     skillhome sync --full       完整同步（重建所有链接）
+    skillhome doctor            体检：死链/链式链接/bin 目录/remote/agent 目录健康（--fix 修复）
     skillhome status            查看当前状态
     skillhome list              列出所有 skill 及其分布
     skillhome link <skill> <agent>    把 skill 链接到 agent 目录
@@ -1824,26 +2444,228 @@ def cmd_help():
     skillhome sync --cloud      本地同步后接云端双向同步（需先配置 remote）
     skillhome cloud status      云同步状态（rclone / remote / 上次同步）
     skillhome cloud remote set|unset <name>  设置/清除 rclone remote
-    skillhome cloud pull|push|sync  云端双向同步（rclone bisync，冲突存为 *.conflictN）
+    skillhome cloud pull|push|sync  云端双向同步（bisync 后自动扩散；--no-fanout 关闭）
     skillhome cloud backups     列出同步前自动备份（保留最近 3 份）
-    skillhome cloud restore <name>  从指定备份恢复 skills/ 与 config.json
+    skillhome cloud restore <name>  从指定备份恢复 skills/ 与 config.json（恢复后自动扩散）
     skillhome cloud help        云同步详细用法
     skillhome config            查看当前配置
     skillhome help              显示此帮助
+
+  通用选项:
+    -v, --verbose   DEBUG 级别输出    -q, --quiet   只输出 WARN/ERROR
+    --dry-run       预览不改动        --prune       清理死链与链式链接
+    --source <s>    通知分流（assistant|majordomo，默认 assistant）
+    --no-notify     禁用完成通知（默认开启，报告写入 ~/.skillhome/notifications/）
 
   中央仓库: %s
   配置文件: %s
 
   首次使用:
-    1. skillhome init     (自动扫描发现 skill 目录)
-    2. skillhome sync     (迁移到中央仓库 + 创建链接)
-    3. skillhome status   (检查状态)
+    1. skillhome init     (一条命令完成装机：注册命令+发现目录+云端+扩散)
+    2. skillhome status   (检查状态)
+    3. skillhome doctor   (体检)
 
   平台:
     Windows: NTFS junction（不需要管理员权限）
     Linux/macOS: symlink
     依赖: Python 3.8+
 """ % (CENTRAL_SKILLS, CONFIG_PATH))
+
+
+# ============================================================
+# notify — 任务完成通知（双 Hermes 分流）
+# ============================================================
+# 两个 Hermes 实例：assistant（助手 Vela）与 majordomo（大管家 Vela）。
+# 每个通知报告带 source 字段，飞书消息只发给对应负责人。
+# 分流规则：优先 FEISHU_<SOURCE>_CHANNEL / FEISHU_<SOURCE>_APP_ID /
+# FEISHU_<SOURCE>_APP_SECRET（.env 或进程环境变量），缺省回退到共享的
+# FEISHU_HOME_CHANNEL / FEISHU_APP_ID / FEISHU_APP_SECRET。
+# 无凭证时静默跳过发送（JSON 报告照写）；发送失败只记 WARN，绝不阻塞主任务。
+NOTIFY_SOURCES = ("assistant", "majordomo")
+_HERMES_ENV_CACHE = None
+
+
+def _hermes_env():
+    """惰性读取 ~/.hermes/.env 为 dict（进程环境变量优先，见 _notify_env）。"""
+    global _HERMES_ENV_CACHE
+    if _HERMES_ENV_CACHE is not None:
+        return _HERMES_ENV_CACHE
+    env = {}
+    try:
+        for line in HERMES_ENV_PATH.read_text(
+                encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            k = k.strip()
+            v = v.strip().strip('"').strip("'")
+            if k:
+                env[k] = v
+    except OSError:
+        pass
+    _HERMES_ENV_CACHE = env
+    return env
+
+
+def _notify_env(key):
+    """进程环境变量优先，其次 ~/.hermes/.env。"""
+    return os.environ.get(key) or _hermes_env().get(key)
+
+
+def _feishu_api_base(domain):
+    """FEISHU_DOMAIN -> API base。feishu/lark 为别名，其余按主机名/URL 处理。"""
+    d = (domain or "feishu").strip()
+    low = d.lower()
+    if low in ("feishu", "open.feishu.cn"):
+        return "https://open.feishu.cn"
+    if low in ("lark", "open.larksuite.com"):
+        return "https://open.larksuite.com"
+    if low.startswith("http://") or low.startswith("https://"):
+        return d.rstrip("/")
+    return f"https://{d}"
+
+
+def _feishu_send(source, text):
+    """发飞书文本消息给 source 对应的负责人。
+
+    返回 True 发送成功；None 无凭证（静默跳过）；False 发送失败（已记 WARN）。
+    """
+    prefix = f"FEISHU_{source.upper()}_"
+    app_id = _notify_env(prefix + "APP_ID") or _notify_env("FEISHU_APP_ID")
+    app_secret = (_notify_env(prefix + "APP_SECRET")
+                  or _notify_env("FEISHU_APP_SECRET"))
+    chat_id = (_notify_env(prefix + "CHANNEL")
+               or _notify_env("FEISHU_HOME_CHANNEL"))
+    if not (app_id and app_secret and chat_id):
+        return None
+    base = _feishu_api_base(_notify_env("FEISHU_DOMAIN"))
+    try:
+        req = urllib.request.Request(
+            f"{base}/open-apis/auth/v3/tenant_access_token/internal",
+            data=json.dumps(
+                {"app_id": app_id, "app_secret": app_secret}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=10) as r:
+            tok = json.loads(r.read().decode())
+        token = tok.get("tenant_access_token")
+        if not token:
+            log(f"[notify] 飞书 token 获取失败: {tok.get('msg')}", "WARN")
+            return False
+        body = {"receive_id": chat_id, "msg_type": "text",
+                "content": json.dumps({"text": text}, ensure_ascii=False)}
+        req = urllib.request.Request(
+            f"{base}/open-apis/im/v1/messages?receive_id_type=chat_id",
+            data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {token}"}, method="POST")
+        with urllib.request.urlopen(req, timeout=10) as r:
+            resp = json.loads(r.read().decode())
+        if resp.get("code") == 0:
+            return True
+        log(f"[notify] 飞书发送失败: {resp.get('msg')}", "WARN")
+        return False
+    except Exception as e:
+        log(f"[notify] 飞书发送异常: {e}", "WARN")
+        return False
+
+
+def notify(source, task_type, status, result=None):
+    """任务完成通知：写 JSON 报告到 ~/.skillhome/notifications/ 并按
+    source 分流发飞书。任何内部失败只记 WARN，绝不影响主任务。"""
+    try:
+        if source not in NOTIFY_SOURCES:
+            source = "assistant"
+        result = result or {}
+        NOTIFY_DIR.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc)
+        stamp = now.strftime("%Y%m%d-%H%M%S")
+
+        report = {
+            "source": source,
+            "task_type": task_type,
+            "timestamp": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "status": status,
+            "task": result.get("task", f"skillhome {task_type}"),
+            "duration_seconds": result.get("duration_seconds"),
+        }
+        if status == "success":
+            report["result"] = result.get("result", {})
+        else:
+            report["error"] = result.get("error", "unknown error")
+
+        fname = f"{source}-{task_type}-{stamp}.json"
+        fpath = NOTIFY_DIR / fname
+        n = 1
+        while fpath.exists():
+            n += 1
+            fpath = NOTIFY_DIR / f"{source}-{task_type}-{stamp}-{n}.json"
+
+        if status == "success":
+            summary = report["result"].get("summary", "done")
+            text = (f"✅ SkillHome 任务完成\n"
+                    f"任务：{task_type}\n"
+                    f"负责人：{source}\n"
+                    f"耗时：{report['duration_seconds']}s\n"
+                    f"结果：{summary}")
+        else:
+            text = (f"❌ SkillHome 任务失败\n"
+                    f"任务：{task_type}\n"
+                    f"负责人：{source}\n"
+                    f"错误：{report['error']}")
+
+        sent = _feishu_send(source, text)
+        report["feishu_sent"] = bool(sent)
+        fpath.write_text(json.dumps(report, indent=2, ensure_ascii=False),
+                         encoding="utf-8")
+        log(f"[notify] 报告已写入 {fpath.name} "
+            f"(feishu_sent={report['feishu_sent']})", "DEBUG")
+        return fpath
+    except Exception as e:
+        log(f"[notify] 通知模块异常（已忽略）: {e}", "WARN")
+        return None
+
+
+def _parse_notify_flags(args):
+    """提取 --source/--no-notify。返回 (source, enabled, 剩余 args)。
+
+    --source 支持 `--source majordomo` 与 `--source=majordomo` 两种写法；
+    非法值回退 assistant 并记 WARN。
+    """
+    source = "assistant"
+    enabled = True
+    rest = []
+    skip = False
+    for i, a in enumerate(args):
+        if skip:
+            skip = False
+            continue
+        if a == "--source":
+            if i + 1 < len(args):
+                source = args[i + 1].strip().lower()
+                skip = True
+            continue
+        if a.startswith("--source="):
+            source = a.split("=", 1)[1].strip().lower()
+            continue
+        if a == "--no-notify":
+            enabled = False
+            continue
+        rest.append(a)
+    if source not in NOTIFY_SOURCES:
+        if source != "assistant":
+            log(f"[notify] 未知 source '{source}'，回退为 assistant", "WARN")
+        source = "assistant"
+    return source, enabled, rest
+
+
+def _notify_task_type(cmd, args):
+    """该命令是否产生完成通知；返回 task_type 或 None。"""
+    if cmd in ("init", "doctor", "sync"):
+        return cmd
+    if cmd == "cloud" and args and args[0].lower() in ("pull", "push", "sync"):
+        return f"cloud-{args[0].lower()}"
+    return None
 
 
 # ============================================================
@@ -1854,55 +2676,102 @@ def main():
         cmd_help()
         sys.exit(0)
 
-    cmd = sys.argv[1].lower()
-    args = sys.argv[2:]
+    # 全局日志级别：-v/--verbose 开 DEBUG，-q/--quiet 只留 WARN+
+    global LOG_LEVEL
+    argv = sys.argv[1:]
+    if "--verbose" in argv or "-v" in argv:
+        LOG_LEVEL = "DEBUG"
+    elif "--quiet" in argv or "-q" in argv:
+        LOG_LEVEL = "WARN"
 
-    if cmd == "init":
-        cmd_discover(force=True)
-    elif cmd == "discover":
-        cmd_discover(force=True)
-    elif cmd == "sync":
-        dry_run = "--dry" in args
-        incremental = "--full" not in args
-        verbose = "--verbose" in args
-        cmd_sync(dry_run=dry_run, incremental=incremental, verbose=verbose)
-        if "--cloud" in args:
-            cfg = load_config()
-            if cfg and cfg.get("cloudRemote") and cfg.get("cloudEnabled", True):
-                _cloud_run("sync", args)
+    cmd = argv[0].lower()
+    source, notify_on, args = _parse_notify_flags(argv[1:])
+    task_type = _notify_task_type(cmd, args)
+    t0 = time.monotonic()
+    cmd_result = None
+
+    try:
+        if cmd == "init":
+            cmd_init(args)
+        elif cmd == "discover":
+            cmd_discover(
+                interactive=("-i" in args or "--interactive" in args),
+                merge=("--replace" not in args),
+                dry_run=("--dry" in args or "--dry-run" in args),
+            )
+        elif cmd == "install":
+            cmd_install(dry_run=("--dry" in args or "--dry-run" in args))
+        elif cmd == "doctor":
+            cmd_doctor(args)
+        elif cmd == "sync":
+            dry_run = "--dry" in args or "--dry-run" in args
+            incremental = "--full" not in args
+            verbose = "--verbose" in args or "-v" in args
+            prune = "--prune" in args
+            cmd_result = cmd_sync(dry_run=dry_run, incremental=incremental,
+                                  verbose=verbose, prune=prune)
+            if "--cloud" in args:
+                cfg = load_config()
+                if (cfg and cfg.get("cloudRemote")
+                        and cfg.get("cloudEnabled", True)):
+                    _cloud_run("sync", args)
+                else:
+                    print("未配置云同步，已跳过云端步骤")
+                    print("启用: skillhome cloud remote set <remote>")
+        elif cmd == "status":
+            cmd_status()
+        elif cmd == "list":
+            cmd_list()
+        elif cmd == "link":
+            if len(args) >= 2:
+                cmd_link(args[0], args[1])
             else:
-                print("未配置云同步，已跳过云端步骤")
-                print("启用: skillhome cloud remote set <remote>")
-    elif cmd == "status":
-        cmd_status()
-    elif cmd == "list":
-        cmd_list()
-    elif cmd == "link":
-        if len(args) >= 2:
-            cmd_link(args[0], args[1])
+                cmd_link(None, None)
+        elif cmd == "unlink":
+            if len(args) >= 2:
+                cmd_unlink(args[0], args[1])
+            else:
+                cmd_unlink(None, None)
+        elif cmd == "global":
+            skill = args[0] if len(args) >= 1 else None
+            action = args[1] if len(args) >= 2 else None
+            cmd_global(skill, action)
+        elif cmd == "add":
+            cmd_add(args)
+        elif cmd == "cloud":
+            cmd_cloud(args)
+        elif cmd == "config":
+            cmd_config()
+        elif cmd == "help":
+            cmd_help()
         else:
-            cmd_link(None, None)
-    elif cmd == "unlink":
-        if len(args) >= 2:
-            cmd_unlink(args[0], args[1])
-        else:
-            cmd_unlink(None, None)
-    elif cmd == "global":
-        skill = args[0] if len(args) >= 1 else None
-        action = args[1] if len(args) >= 2 else None
-        cmd_global(skill, action)
-    elif cmd == "add":
-        cmd_add(args)
-    elif cmd == "cloud":
-        cmd_cloud(args)
-    elif cmd == "config":
-        cmd_config()
-    elif cmd == "help":
-        cmd_help()
-    else:
-        print(f"未知命令: {cmd}")
-        cmd_help()
-        sys.exit(1)
+            print(f"未知命令: {cmd}")
+            cmd_help()
+            sys.exit(1)
+    except Exception as e:
+        if task_type and notify_on:
+            notify(source, task_type, "failed", {
+                "task": f"skillhome {task_type}",
+                "duration_seconds": round(time.monotonic() - t0, 1),
+                "error": str(e),
+            })
+        raise
+
+    if task_type and notify_on:
+        result = {"summary": f"skillhome {task_type} 完成"}
+        if isinstance(cmd_result, dict):
+            result = {
+                "summary": (f"迁移 {cmd_result.get('migrated', 0)} | "
+                            f"新建链接 {cmd_result.get('created', 0)} | "
+                            f"冲突 {cmd_result.get('conflicts', 0)} | "
+                            f"残留真实 {cmd_result.get('reals_left', 0)}"),
+                "report": cmd_result,
+            }
+        notify(source, task_type, "success", {
+            "task": f"skillhome {task_type}",
+            "duration_seconds": round(time.monotonic() - t0, 1),
+            "result": result,
+        })
 
 
 if __name__ == "__main__":
