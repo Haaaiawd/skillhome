@@ -11,6 +11,7 @@ import re
 import sys
 import json
 import shutil
+import fnmatch
 import hashlib
 import platform
 import zipfile
@@ -39,12 +40,21 @@ CENTRAL_SKILLS = HOME_ROOT / "skills"
 BIN_DIR = HOME_ROOT / "bin"
 CONFIG_PATH = HOME_ROOT / "config.json"
 LOG_FILE = HOME_ROOT / "skillhome.log"
+STATE_PATH = HOME_ROOT / "state.json"  # 本机上下文状态，不参与 cloud sync
 BACKUP_DIR = HOME_ROOT / "backups"
 NOTIFY_DIR = HOME_ROOT / "notifications"
 HERMES_ENV_PATH = HOME / ".hermes" / ".env"
 
 DEFAULT_SKIP_NAMES = [".system", ".git", ".temp", "_shared"]
 DEFAULT_SIMILARITY_THRESHOLD = 0.95
+
+# 项目 skill 识别规则（config.json 的 scopeRules 可覆盖；
+# 配置里显式写 "scopeRules": {} 可完全关闭默认识别）
+DEFAULT_SCOPE_RULES = {
+    "duly": ["duly-*"],
+    "paper-wechat": ["paper-wechat-*", "拆解-*"],
+    "skillhome": ["skillhome-*"],
+}
 
 # 已知 agent skill 目录模式（相对于用户主目录）
 if IS_WINDOWS:
@@ -295,6 +305,7 @@ def _config_scaffold():
         "agentDirs": {},
         "skipNames": DEFAULT_SKIP_NAMES,
         "similarityThreshold": DEFAULT_SIMILARITY_THRESHOLD,
+        "scopeRules": dict(DEFAULT_SCOPE_RULES),
     }
 
 
@@ -544,6 +555,15 @@ def cmd_discover(interactive=False, merge=True, dry_run=False):
         print(f"  [merge] 保留已配置 {len(existing.get('agentDirs', {}))} 个目录")
         final = merged
 
+    # 项目 skill 识别：按 scopeRules / frontmatter 补写中央仓库 meta
+    marked = _refresh_scope_metadata(
+        rules=_scope_rules(existing or {}), dry_run=dry_run)
+    if marked:
+        print(f"  [scope] 识别到 {len(marked)} 个项目 skill"
+              f"{'（预览）' if dry_run else ''}: "
+              + ", ".join(f"{n}[{p or '?'}]" for n, p in marked[:10])
+              + (f" 等 {len(marked)} 个" if len(marked) > 10 else ""))
+
     if dry_run:
         print(f"\n[DRY] 将写入 {len(final)} 个 skill 目录到 config.json（预览，未写入）")
         return final
@@ -661,9 +681,439 @@ def _next_backup_path(name: str) -> Path:
 
 
 # ============================================================
+# 项目 scope 识别
+# ============================================================
+# 项目 skill（scope=project）只保留在中央仓库，sync 时不扩散到各
+# agent 目录；--include-project 可强制扩散。识别依据按优先级：
+#   1. SKILL.md frontmatter: scope: project / project: <name>
+#      （显式 scope: global 可关闭自动识别）
+#   2. scopeRules 模式命中 skill 名（fnmatch，另附 <proj>- 前缀兜底）
+#   3. 来源路径目录段命中项目名（如 .../duly/.agents/skills/x）
+# meta 里 "scope_manual": true 表示人工指定 scope，跳过自动识别。
+def _scope_rules(cfg=None):
+    """生效的 scopeRules：config.json 有该键则用其值（可为 {}），否则用默认。"""
+    if cfg is None:
+        cfg = load_config() or {}
+    rules = cfg.get("scopeRules")
+    if isinstance(rules, dict):
+        return rules
+    return DEFAULT_SCOPE_RULES
+
+
+def _skill_frontmatter(skill_path: Path) -> dict:
+    """解析 SKILL.md frontmatter 顶层 key: value（无第三方依赖）。"""
+    sm = skill_path / "SKILL.md"
+    if not sm.is_file():
+        return {}
+    try:
+        text = _decode_text(sm.read_bytes())
+    except OSError:
+        return {}
+    s = text.lstrip()
+    if not s.startswith("---"):
+        return {}
+    data = {}
+    for line in s[3:].splitlines():
+        if line.strip() == "---":
+            break
+        m = re.match(r"^([A-Za-z_][\w-]*)\s*:\s*(.*?)\s*$", line)
+        if m:
+            data[m.group(1).lower()] = m.group(2).strip().strip("\"'")
+    return data
+
+
+def _match_project_by_name(sname: str, rules: dict):
+    """scopeRules 模式或 <proj>- 前缀命中 skill 名，返回项目名。"""
+    low = sname.lower()
+    for proj, patterns in rules.items():
+        pats = patterns if isinstance(patterns, list) else [patterns]
+        for pat in pats:
+            if fnmatch.fnmatchcase(low, str(pat).lower()):
+                return proj
+        if low.startswith(str(proj).lower() + "-"):
+            return proj
+    return None
+
+
+def _match_project_by_path(paths, rules: dict):
+    """任一来源路径的目录段命中项目名，返回项目名。
+
+    忽略末段（skill 目录名本身）——路径规则针对的是父级项目目录，
+    如 .../duly/.agents/skills/foo；否则名为 skillhome 的 skill
+    会被自身目录名误判为项目 skill。
+    """
+    segs = set()
+    for p in paths or []:
+        for seg in Path(str(p)).parts[:-1]:
+            segs.add(seg.lower())
+    for proj in rules:
+        if str(proj).lower() in segs:
+            return proj
+    return None
+
+
+def detect_project_scope(sname: str, skill_path=None, origin_paths=None,
+                         rules=None):
+    """识别项目 skill。返回 (is_project, project_name|None)。"""
+    if rules is None:
+        rules = _scope_rules()
+    fm = _skill_frontmatter(skill_path) if skill_path else {}
+    fm_scope = str(fm.get("scope", "")).strip().lower()
+    fm_project = fm.get("project") or None
+    if fm_scope == "global":
+        return False, None
+    if fm_scope == "project":
+        proj = fm_project or _match_project_by_name(sname, rules)
+        if not proj:
+            paths = ([str(skill_path)] if skill_path else []) \
+                + list(origin_paths or [])
+            proj = _match_project_by_path(paths, rules)
+        return True, proj
+    if fm_project:
+        return True, fm_project
+    hit = _match_project_by_name(sname, rules)
+    if hit:
+        return True, hit
+    paths = ([str(skill_path)] if skill_path else []) \
+        + list(origin_paths or [])
+    hit = _match_project_by_path(paths, rules)
+    if hit:
+        return True, hit
+    return False, None
+
+
+def _skill_scope_info(cpath: Path, sname: str, rules=None, origin_paths=None):
+    """skill 的有效 (scope, project)。meta 中 scope_manual 优先，否则自动识别。"""
+    meta = read_meta(cpath)
+    if (meta and meta.get("scope_manual")
+            and meta.get("scope") in ("global", "project")):
+        return meta["scope"], meta.get("project")
+    is_proj, proj = detect_project_scope(sname, cpath, origin_paths, rules)
+    return ("project" if is_proj else "global"), proj
+
+
+def _refresh_scope_metadata(rules=None, dry_run=False):
+    """扫描中央仓库，自动识别项目归属并补写 meta 的 scope/project。
+
+    不覆盖 scope_manual 的人工指定；识别为 project 时把 auto 的
+    global 标记翻转为 false（global_manual 人工开关豁免）。
+    返回 [(sname, project)] 识别结果。
+    """
+    if not CENTRAL_SKILLS.exists():
+        return []
+    if rules is None:
+        rules = _scope_rules()
+    marked = []
+    for d in sorted(CENTRAL_SKILLS.iterdir()):
+        if not d.is_dir():
+            continue
+        meta = read_meta(d)
+        if (meta and meta.get("scope_manual")
+                and meta.get("scope") in ("global", "project")):
+            continue
+        is_proj, proj = detect_project_scope(d.name, d, rules=rules)
+        if is_proj:
+            marked.append((d.name, proj))
+        if not meta:
+            continue  # 新 skill 的 meta 由 sync 阶段 4 创建，这里不代建
+        scope = "project" if is_proj else "global"
+        changed = False
+        if meta.get("scope") != scope:
+            meta["scope"] = scope
+            changed = True
+        if proj and meta.get("project") != proj:
+            meta["project"] = proj
+            changed = True
+        elif not proj and meta.pop("project", None) is not None:
+            changed = True
+        if is_proj and meta.get("global") and not meta.get("global_manual"):
+            meta["global"] = False
+            changed = True
+        if changed and not dry_run:
+            write_meta(d, meta)
+    return marked
+
+
+def _parse_scope_flags(args):
+    """提取 --scope/--project。返回 (scope, project, 剩余 args)。"""
+    scope = "all"
+    project = None
+    rest = []
+    skip = False
+    for i, a in enumerate(args):
+        if skip:
+            skip = False
+            continue
+        if a == "--scope":
+            if i + 1 < len(args):
+                scope = args[i + 1].strip().lower()
+                skip = True
+            continue
+        if a.startswith("--scope="):
+            scope = a.split("=", 1)[1].strip().lower()
+            continue
+        if a == "--project":
+            if i + 1 < len(args):
+                project = args[i + 1].strip()
+                skip = True
+            continue
+        if a.startswith("--project="):
+            project = a.split("=", 1)[1].strip()
+            continue
+        rest.append(a)
+    return scope, project, rest
+
+
+# ============================================================
+# 项目上下文 — 活跃项目状态与按需扩散
+# ============================================================
+def load_state():
+    """读取本机上下文状态（~/.skillhome/state.json）；缺失/损坏返回 {}。"""
+    try:
+        raw = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_state(state):
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    STATE_PATH.write_text(
+        json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _project_skills(project, rules=None):
+    """中央仓库中归属 project 的项目 skill：{name: central_path}。"""
+    if rules is None:
+        rules = _scope_rules()
+    found = {}
+    if not project or not CENTRAL_SKILLS.exists():
+        return found
+    for d in CENTRAL_SKILLS.iterdir():
+        if not d.is_dir():
+            continue
+        scope, proj = _skill_scope_info(d, d.name, rules)
+        if scope == "project" and proj == project:
+            found[d.name] = d
+    return found
+
+
+def _known_projects(rules=None):
+    """可选项目集合：scopeRules 键 ∪ 中央仓库中识别出的 project。"""
+    if rules is None:
+        rules = _scope_rules()
+    projs = set(rules.keys())
+    if CENTRAL_SKILLS.exists():
+        for d in CENTRAL_SKILLS.iterdir():
+            if not d.is_dir():
+                continue
+            scope, proj = _skill_scope_info(d, d.name, rules)
+            if scope == "project" and proj:
+                projs.add(proj)
+    return sorted(projs)
+
+
+def _infer_project_from_path(path, projects):
+    """按路径段（含末段）匹配项目名，取最深命中；无命中返回 None。"""
+    try:
+        parts = Path(path).resolve().parts
+    except OSError:
+        parts = Path(path).parts
+    lookup = {str(p).lower(): p for p in projects}
+    hit = None
+    for seg in parts:
+        if seg.lower() in lookup:
+            hit = lookup[seg.lower()]
+    return hit
+
+
+def _print_project_choices(projects, rules):
+    if projects:
+        print("可选项目:")
+        for p in projects:
+            print(f"  {p}  ({len(_project_skills(p, rules))} 个 skill)")
+    print("用法: skillhome use <project> | --none [--dry-run]")
+
+
+def _apply_project_links(project, agent_dirs, rules=None, dry_run=False,
+                         prev_names=()):
+    """让各 agent 目录的项目链接与活跃项目一致（幂等）。
+
+    - project 的项目 skill：缺链则建；已有链接跳过；真实目录不覆盖。
+    - 其它项目的项目 skill 链接：移除（global_manual 人工扩散豁免）。
+    - prev_names 中已不在中央仓库的遗留链接：一并移除。
+    返回 (项目 skill 名列表, 新建数, 移除数, 已有数)。
+    """
+    if rules is None:
+        rules = _scope_rules()
+    want = _project_skills(project, rules)
+    stale = set()
+    if CENTRAL_SKILLS.exists():
+        for d in CENTRAL_SKILLS.iterdir():
+            if not d.is_dir():
+                continue
+            scope, proj = _skill_scope_info(d, d.name, rules)
+            if scope != "project" or proj == project:
+                continue
+            meta = read_meta(d) or {}
+            if meta.get("global") and meta.get("global_manual"):
+                continue
+            stale.add(d.name)
+    stale.update(n for n in prev_names
+                 if n not in want and not (CENTRAL_SKILLS / n).is_dir())
+
+    created = removed = kept = 0
+    for agent_name, adir_str in (agent_dirs or {}).items():
+        adir = Path(adir_str)
+        if not adir.is_dir():
+            continue
+        for name in sorted(stale):
+            lp = adir / name
+            if (lp.exists() or lp.is_symlink()) and is_link(lp):
+                log(f"[{agent_name}] 移除项目链接: {name}")
+                removed += 1
+                if not dry_run:
+                    remove_link(lp)
+        for name, cpath in sorted(want.items()):
+            lp = adir / name
+            if lp.exists() or lp.is_symlink():
+                if is_link(lp):
+                    kept += 1
+                else:
+                    log(f"[{agent_name}] {name} 为真实目录，跳过（不覆盖）",
+                        "WARN")
+                continue
+            log(f"[{agent_name}] 链接项目 skill: {name}")
+            created += 1
+            if not dry_run:
+                create_link(lp, cpath)
+    return sorted(want), created, removed, kept
+
+
+def cmd_use(args):
+    """激活/切换/退出项目上下文：skillhome use <project> | --none | (推断)。"""
+    cfg = load_config()
+    if not cfg:
+        print("config.json 不存在，请先运行: skillhome init")
+        return
+    args = args or []
+    dry_run = "--dry" in args or "--dry-run" in args
+    rest = [a for a in args if a not in ("--dry", "--dry-run")]
+    agent_dirs = cfg.get("agentDirs", {})
+    rules = _scope_rules(cfg)
+    projects = _known_projects(rules)
+    prev = load_state()
+    prev_names = prev.get("activatedSkills") or []
+
+    if rest and rest[0] in ("--none", "none", "off", "-"):
+        _names, _c, removed, _k = _apply_project_links(
+            None, agent_dirs, rules, dry_run=dry_run, prev_names=prev_names)
+        if not dry_run:
+            save_state({
+                "activeProject": None,
+                "activatedSkills": [],
+                "activatedAt": datetime.now().isoformat(),
+                "pwd": str(Path.cwd()),
+            })
+        print(f"{'[DRY] ' if dry_run else ''}已退出项目上下文: "
+              f"清理项目链接 {removed} 条，全局 skills 不受影响")
+        return
+
+    project = rest[0] if rest else None
+    if project is not None and project.startswith("-"):
+        print(f"未知参数: {project}")
+        _print_project_choices(projects, rules)
+        return
+    if project is None:
+        project = _infer_project_from_path(Path.cwd(), projects)
+        if not project:
+            print(f"无法从当前目录推断项目: {Path.cwd()}")
+            _print_project_choices(projects, rules)
+            return
+        print(f"当前目录推断项目: {project}")
+    elif project not in projects:
+        print(f"未知项目: {project}")
+        _print_project_choices(projects, rules)
+        print("若为新项目，请先在 config.json 的 scopeRules 中登记。")
+        return
+
+    names, created, removed, kept = _apply_project_links(
+        project, agent_dirs, rules, dry_run=dry_run, prev_names=prev_names)
+    if not names:
+        print(f"提示: 项目 '{project}' 暂无对应项目 skill"
+              f"（scope=project 且 project={project}）")
+    if not dry_run:
+        save_state({
+            "activeProject": project,
+            "activatedSkills": names,
+            "activatedAt": datetime.now().isoformat(),
+            "pwd": str(Path.cwd()),
+        })
+    print(f"{'[DRY] ' if dry_run else ''}活跃项目: {project} | "
+          f"项目 skill {len(names)} 个 | "
+          f"新建链接 {created} | 已有 {kept} | 清理 {removed}")
+    if names:
+        print("  " + ", ".join(names))
+
+
+def cmd_context(args):
+    """显示当前上下文；--ensure 补齐缺失的项目链接并清理过期链接。"""
+    cfg = load_config()
+    if not cfg:
+        print("config.json 不存在，请先运行: skillhome init")
+        return
+    args = args or []
+    ensure = "--ensure" in args
+    rules = _scope_rules(cfg)
+    agent_dirs = cfg.get("agentDirs", {})
+    state = load_state()
+    project = state.get("activeProject")
+
+    print("SkillHome 上下文")
+    if not project:
+        print("  活跃项目: (无 — 仅全局 skills 生效)")
+        inferred = _infer_project_from_path(
+            Path.cwd(), _known_projects(rules))
+        if inferred:
+            print(f"  当前目录: {Path.cwd()}")
+            print(f"  推断项目: {inferred}"
+                  f" → skillhome use {inferred} 激活")
+        return
+
+    skills = _project_skills(project, rules)
+    print(f"  活跃项目: {project}")
+    print(f"  激活时间: {state.get('activatedAt') or '-'}")
+    print(f"  记录路径: {state.get('pwd') or '-'}")
+    print(f"  项目 skill ({len(skills)}): "
+          + (", ".join(sorted(skills)) if skills else "-"))
+
+    missing = 0
+    for agent_name, adir_str in agent_dirs.items():
+        adir = Path(adir_str)
+        if not adir.is_dir():
+            continue
+        miss = [n for n in sorted(skills) if not is_link(adir / n)]
+        missing += len(miss)
+        if miss:
+            print(f"  [{agent_name}] 缺 {len(miss)} 条链接: "
+                  + ", ".join(miss))
+    if missing == 0:
+        print("  链接状态: 全部就绪")
+    elif ensure:
+        names, created, removed, kept = _apply_project_links(
+            project, agent_dirs, rules,
+            prev_names=state.get("activatedSkills") or [])
+        save_state({**state, "activatedSkills": names})
+        print(f"  已补齐: 新建 {created} | 已有 {kept} | 清理 {removed}")
+    else:
+        print("  修复: skillhome context --ensure")
+
+
+# ============================================================
 # sync — 核心同步逻辑
 # ============================================================
-def cmd_sync(dry_run=False, incremental=True, verbose=False, prune=False):
+def cmd_sync(dry_run=False, incremental=True, verbose=False, prune=False,
+             include_project=False):
     cfg = load_config()
     if not cfg:
         print("config.json 不存在，请先运行: skillhome init")
@@ -672,12 +1122,15 @@ def cmd_sync(dry_run=False, incremental=True, verbose=False, prune=False):
     agent_dirs = cfg.get("agentDirs", {})
     skip_names = cfg.get("skipNames", DEFAULT_SKIP_NAMES)
     threshold = cfg.get("similarityThreshold", DEFAULT_SIMILARITY_THRESHOLD)
+    scope_rules = _scope_rules(cfg)
 
     report = {"migrated": 0, "created": 0, "skipped": 0,
-              "pruned": 0, "repointed": 0, "conflicts": 0, "reals_left": 0}
+              "pruned": 0, "repointed": 0, "conflicts": 0, "reals_left": 0,
+              "scope_skipped": 0}
 
     log(f"=== SkillHome 同步开始 (mode: {'incremental' if incremental else 'full'}"
-        f"{', dry-run' if dry_run else ''}{', prune' if prune else ''}) ===")
+        f"{', dry-run' if dry_run else ''}{', prune' if prune else ''}"
+        f"{', include-project' if include_project else ''}) ===")
 
     # 阶段 1：扫描
     skill_registry = {}  # name -> {real_locations, link_locations, real_paths}
@@ -730,6 +1183,10 @@ def cmd_sync(dry_run=False, incremental=True, verbose=False, prune=False):
             skill_registry[sname] = {
                 "real_locations": [], "link_locations": [], "real_paths": {}
             }
+
+    # 项目 scope 识别用的来源路径（迁移前的真实目录位置）
+    origin_paths = {sn: list(info["real_paths"].values())
+                    for sn, info in skill_registry.items()}
 
     # 阶段 2：迁移真实存储到中央
     log("=== 阶段 2: 迁移真实存储 ===")
@@ -908,9 +1365,18 @@ def cmd_sync(dry_run=False, incremental=True, verbose=False, prune=False):
             meta = read_meta(cpath)
             # meta 缺失时套用阶段 4 的默认规则：非 -- 变体默认 global
             is_global = (meta or {}).get("global", "--" not in sname)
+            scope, project = _skill_scope_info(
+                cpath, sname, scope_rules, origin_paths.get(sname))
+
+            if scope == "project" and not include_project:
+                log(f"{sname} : 项目 skill"
+                    f"{f' ({project})' if project else ''}，"
+                    f"仅保留中央仓库，跳过扩散", "DEBUG")
+                report["scope_skipped"] += 1
+                continue
 
             target_agents = skill_distribution[sname]
-            if is_global:
+            if is_global or (scope == "project" and include_project):
                 target_agents = sorted(agent_dirs.keys())
                 log(f"{sname} : global 标记，扩散到所有 agent", "DEBUG")
 
@@ -952,9 +1418,18 @@ def cmd_sync(dry_run=False, incremental=True, verbose=False, prune=False):
                 continue
             meta = read_meta(cpath)
             is_global = (meta or {}).get("global", "--" not in sname)
+            scope, project = _skill_scope_info(
+                cpath, sname, scope_rules, origin_paths.get(sname))
+
+            if scope == "project" and not include_project:
+                log(f"{sname} : 项目 skill"
+                    f"{f' ({project})' if project else ''}，"
+                    f"仅保留中央仓库，跳过扩散", "DEBUG")
+                report["scope_skipped"] += 1
+                continue
 
             target_agents = skill_distribution[sname]
-            if is_global:
+            if is_global or (scope == "project" and include_project):
                 target_agents = sorted(agent_dirs.keys())
                 log(f"{sname} : global 标记，扩散到所有 agent", "DEBUG")
 
@@ -979,18 +1454,28 @@ def cmd_sync(dry_run=False, incremental=True, verbose=False, prune=False):
             continue
         existing = read_meta(cpath)
         desired_sources = skill_distribution[sname]
-        default_global = "--" not in sname
+        scope, project = _skill_scope_info(
+            cpath, sname, scope_rules, origin_paths.get(sname))
+        default_global = "--" not in sname and scope != "project"
 
         if not existing:
             if not dry_run:
-                write_meta(cpath, {
+                new_meta = {
                     "name": sname,
                     "sources": desired_sources,
                     "merged": False,
                     "global": default_global,
+                    "scope": scope,
                     "created_at": datetime.now().isoformat(),
-                })
-                if default_global:
+                }
+                if project:
+                    new_meta["project"] = project
+                write_meta(cpath, new_meta)
+                if scope == "project":
+                    log(f"{sname} : 识别为项目 skill"
+                        f"{f' ({project})' if project else ''}，"
+                        f"不扩散", "DEBUG")
+                elif default_global:
                     log(f"{sname} : 新 skill，默认标记为 global", "DEBUG")
         else:
             needs_update = False
@@ -1003,8 +1488,45 @@ def cmd_sync(dry_run=False, incremental=True, verbose=False, prune=False):
                 needs_update = True
                 if default_global:
                     log(f"{sname} : 补充 global 标记（默认规则）", "DEBUG")
+            if not existing.get("scope_manual"):
+                if existing.get("scope") != scope:
+                    existing["scope"] = scope
+                    needs_update = True
+                if project and existing.get("project") != project:
+                    existing["project"] = project
+                    needs_update = True
+                elif not project and existing.pop("project", None) is not None:
+                    needs_update = True
+                # 识别为项目 skill -> 自动标记 global: false
+                # （global_manual 人工开关豁免）
+                if (scope == "project" and existing.get("global")
+                        and not existing.get("global_manual")):
+                    existing["global"] = False
+                    needs_update = True
+                    log(f"{sname} : 识别为项目 skill"
+                        f"{f' ({project})' if project else ''}，"
+                        f"自动标记 global: false", "DEBUG")
             if needs_update and not dry_run:
                 write_meta(cpath, existing)
+
+    # 项目上下文：活跃项目的 skills 保持链接（sync --full 重建后同样生效），
+    # 其它项目的链接清出。--include-project 显式全量扩散时不做清理。
+    state = load_state()
+    active = state.get("activeProject")
+    if active and not include_project:
+        names, p_created, p_removed, _p_kept = _apply_project_links(
+            active, agent_dirs, scope_rules, dry_run=dry_run,
+            prev_names=state.get("activatedSkills") or [])
+        report["created"] += p_created
+        if p_created or p_removed:
+            log(f"活跃项目 {active}: 补齐项目链接 {p_created} | "
+                f"清理其它项目 {p_removed}")
+        else:
+            log(f"活跃项目 {active}: {len(names)} 个项目 skill 链接已就绪",
+                "DEBUG")
+        if not dry_run and names != (state.get("activatedSkills") or []):
+            state["activatedSkills"] = names
+            save_state(state)
 
     # 汇总
     real_count = 0
@@ -1023,7 +1545,8 @@ def cmd_sync(dry_run=False, incremental=True, verbose=False, prune=False):
     log(f"=== 完成 | 中央 skill: {len(skill_distribution)} | 残留真实目录: {real_count} ===", "OK")
     log(f"同步报告: 迁移 {report['migrated']} | 新建链接 {report['created']} | "
         f"已有(跳过) {report['skipped']} | 死链清理 {report['pruned']} | "
-        f"链式重指 {report['repointed']} | 冲突变体 {report['conflicts']}", "OK")
+        f"链式重指 {report['repointed']} | 冲突变体 {report['conflicts']} | "
+        f"项目 skill 未扩散 {report['scope_skipped']}", "OK")
     return report
 
 
@@ -1071,6 +1594,12 @@ def cmd_status():
     print(f"  链接总数: {total_links}")
     print(f"  残留真实目录: {total_reals}")
     print(f"  agent 目录数: {len(agent_dirs)}")
+    active = load_state().get("activeProject")
+    if active:
+        n = len(load_state().get("activatedSkills") or [])
+        print(f"  活跃项目: {active} ({n} 个项目 skill)")
+    else:
+        print("  活跃项目: (无)")
     print()
     print(f"  {'Agent':<25} {'Links':>8} {'Reals':>8}  Status")
     print(f"  {'-'*25} {'-'*8} {'-'*8}  {'-'*12}")
@@ -1079,28 +1608,71 @@ def cmd_status():
 
 
 # ============================================================
-# list
+# list / search
 # ============================================================
-def cmd_list():
+def _iter_skill_rows(scope_filter="all", project_filter=None):
+    """遍历中央仓库，产出 (name, scope, project, sources, merged, desc)。
+    应用 --scope / --project 过滤。"""
+    if not CENTRAL_SKILLS.exists():
+        return []
+    rules = _scope_rules()
+    rows = []
+    for s in sorted([d for d in CENTRAL_SKILLS.iterdir() if d.is_dir()],
+                    key=lambda x: x.name):
+        meta = read_meta(s)
+        scope, project = _skill_scope_info(s, s.name, rules)
+        if scope_filter == "global" and scope == "project":
+            continue
+        if scope_filter == "project" and scope != "project":
+            continue
+        if project_filter and project != project_filter:
+            continue
+        sources = meta.get("sources", []) if meta else []
+        merged = meta.get("merged", False) if meta else False
+        desc = _skill_frontmatter(s).get("description", "")
+        rows.append((s.name, scope, project or "",
+                     ", ".join(sources), "Y" if merged else "", desc))
+    return rows
+
+
+def _print_skill_rows(rows):
+    print(f"  {'Skill':<35} {'Scope':<8} {'Project':<14} "
+          f"{'Sources':<28} Merged")
+    print(f"  {'-'*35} {'-'*8} {'-'*14} {'-'*28} {'-'*6}")
+    for name, scope, project, sources, merged, _ in rows:
+        print(f"  {name:<35} {scope:<8} {project:<14} "
+              f"{sources:<28} {merged}")
+    print(f"\n共 {len(rows)} 个 skill")
+
+
+def cmd_list(args=None):
     if not CENTRAL_SKILLS.exists():
         print("中央仓库不存在")
         return
-    skills = sorted([d for d in CENTRAL_SKILLS.iterdir() if d.is_dir()],
-                    key=lambda x: x.name)
-    rows = []
-    for s in skills:
-        meta = read_meta(s)
-        sources = []
-        merged = False
-        if meta:
-            sources = meta.get("sources", [])
-            merged = meta.get("merged", False)
-        rows.append((s.name, ", ".join(sources), "Y" if merged else ""))
-    print(f"  {'Skill':<35} {'Sources':<30} Merged")
-    print(f"  {'-'*35} {'-'*30} {'-'*6}")
-    for name, sources, merged in rows:
-        print(f"  {name:<35} {sources:<30} {merged}")
-    print(f"\n共 {len(rows)} 个 skill")
+    scope_filter, project_filter, _ = _parse_scope_flags(args or [])
+    if scope_filter not in ("all", "global", "project"):
+        print(f"未知 scope: {scope_filter}（可选: all | global | project）")
+        return
+    _print_skill_rows(_iter_skill_rows(scope_filter, project_filter))
+
+
+def cmd_search(args):
+    scope_filter, project_filter, rest = _parse_scope_flags(args or [])
+    if scope_filter not in ("all", "global", "project"):
+        print(f"未知 scope: {scope_filter}（可选: all | global | project）")
+        return
+    if not rest:
+        print("用法: skillhome search <关键词> [--scope all|global|project] "
+              "[--project <name>]")
+        print("  匹配 skill 名与 SKILL.md frontmatter 的 description")
+        return
+    if not CENTRAL_SKILLS.exists():
+        print("中央仓库不存在")
+        return
+    kw = " ".join(rest).lower()
+    rows = [r for r in _iter_skill_rows(scope_filter, project_filter)
+            if kw in r[0].lower() or kw in r[5].lower()]
+    _print_skill_rows(rows)
 
 
 # ============================================================
@@ -1211,6 +1783,7 @@ def cmd_global(skill_name, action):
     meta = read_meta(central_path) or {}
     turn_on = action not in ("off", "false", "0")
     meta["global"] = turn_on
+    meta["global_manual"] = True  # 人工开关，自动 scope 识别不再改动 global
     if "name" not in meta:
         meta["name"] = skill_name
     if "sources" not in meta:
@@ -1222,6 +1795,10 @@ def cmd_global(skill_name, action):
     write_meta(central_path, meta)
     if turn_on:
         print(f"{skill_name} 已标记为全局，下次 sync 将扩散到所有 agent")
+        if meta.get("scope") == "project":
+            print(f"注意：该 skill 为项目 scope"
+                  f"（{meta.get('project') or '?'}），"
+                  f"默认仍不扩散，sync 需加 --include-project")
     else:
         print(f"{skill_name} 已取消全局标记")
         print("注意：已存在的链接不会自动移除，需要手动 unlink 或跑完整 sync")
@@ -1324,14 +1901,19 @@ def install_local_to_central(src, is_zip):
             sm.write_text(_decode_text(raw), encoding="utf-8")
             print("SKILL.md 编码已转换为 UTF-8")
 
-    write_meta(dest, {
+    is_proj, proj = detect_project_scope(safe, dest, [str(src)])
+    new_meta = {
         "name": safe,
         "sources": [str(src)],
         "merged": False,
-        "global": True,
+        "global": not is_proj,
+        "scope": "project" if is_proj else "global",
         "created_at": datetime.now().isoformat(),
         "updated_at": datetime.now().isoformat(),
-    })
+    }
+    if proj:
+        new_meta["project"] = proj
+    write_meta(dest, new_meta)
 
     if tmp:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -1359,7 +1941,14 @@ def cmd_add(args):
         name = install_local_to_central(src_path, is_zip=is_local_zip)
         if not name:
             return
-        print(f"已装入中央仓库: {name}（默认全局共享）")
+        meta = read_meta(CENTRAL_SKILLS / name) or {}
+        if meta.get("scope") == "project":
+            proj = meta.get("project")
+            print(f"已装入中央仓库: {name}（识别为项目 skill"
+                  f"{f' [{proj}]' if proj else ''}，"
+                  f"不扩散；--include-project 可强制）")
+        else:
+            print(f"已装入中央仓库: {name}（默认全局共享）")
         print("\nsync 到各 agent ...")
         cmd_sync(incremental=True)
         print("\n完成。")
@@ -2410,6 +2999,13 @@ def cmd_config():
     print(f"  centralSkills: {raw.get('centralSkills')}")
     print(f"  similarityThreshold: {raw.get('similarityThreshold')}")
     print(f"  skipNames: {', '.join(raw.get('skipNames', []))}")
+    rules = _scope_rules(raw)
+    tag = "scopeRules" if isinstance(raw.get("scopeRules"), dict) \
+        else "scopeRules (默认)"
+    print(f"  {tag}:")
+    for proj, pats in rules.items():
+        pats = pats if isinstance(pats, list) else [pats]
+        print(f"    {proj}: {', '.join(str(p) for p in pats)}")
     spec = raw.get("cloudRemote")
     print(f"  cloudRemote: {spec or '(未配置)'}")
     if spec:
@@ -2434,9 +3030,16 @@ def cmd_help():
     skillhome discover          重新扫描发现 skill 目录（默认 merge；--replace 覆盖；-i 逐条确认）
     skillhome sync              手动触发增量同步（--dry-run 预览 | --prune 清理死链）
     skillhome sync --full       完整同步（重建所有链接）
+    skillhome sync --include-project   同步时把项目 skill 也扩散到所有 agent
     skillhome doctor            体检：死链/链式链接/bin 目录/remote/agent 目录健康（--fix 修复）
-    skillhome status            查看当前状态
+    skillhome status            查看当前状态（含活跃项目）
+    skillhome use <project>     激活项目上下文：链接该项目 skills，清理其它项目链接
+    skillhome use               不带参数时按当前目录路径推断项目
+    skillhome use --none        退出项目上下文，仅保留全局 skills（--dry-run 预览）
+    skillhome context           显示活跃项目与已激活 skills（--ensure 补齐缺失链接）
     skillhome list              列出所有 skill 及其分布
+                                （--scope all|global|project 过滤；--project <name> 按项目过滤）
+    skillhome search <关键词>    按名称/description 检索 skill（支持同样的 --scope/--project）
     skillhome link <skill> <agent>    把 skill 链接到 agent 目录
     skillhome unlink <skill> <agent>  从 agent 目录移除链接
     skillhome global <skill> [on|off] 设置/取消全局共享
@@ -2456,6 +3059,18 @@ def cmd_help():
     --dry-run       预览不改动        --prune       清理死链与链式链接
     --source <s>    通知分流（assistant|majordomo，默认 assistant）
     --no-notify     禁用完成通知（默认开启，报告写入 ~/.skillhome/notifications/）
+
+  项目 skill（scope=project）:
+    只保留在中央仓库，sync 时不扩散。识别依据：
+      - SKILL.md frontmatter: scope: project 或 project: <name>
+        （scope: global 显式关闭识别）
+      - config.json 的 scopeRules: {"项目名": ["模式-*"]}（fnmatch）
+      - 来源路径目录段命中项目名（如 .../duly/.agents/skills/x）
+    覆盖: .skillhome.json 写 "scope_manual": true + "scope": "global|project"
+
+  项目上下文（~/.skillhome/state.json，本机状态，不随 cloud sync）:
+    use 记录 activeProject + activatedSkills；sync 自动维持该上下文的链接，
+    agent 会话启动时可用 `skillhome context --ensure` 自愈缺失链接。
 
   中央仓库: %s
   配置文件: %s
@@ -2708,8 +3323,10 @@ def main():
             incremental = "--full" not in args
             verbose = "--verbose" in args or "-v" in args
             prune = "--prune" in args
+            include_project = "--include-project" in args
             cmd_result = cmd_sync(dry_run=dry_run, incremental=incremental,
-                                  verbose=verbose, prune=prune)
+                                  verbose=verbose, prune=prune,
+                                  include_project=include_project)
             if "--cloud" in args:
                 cfg = load_config()
                 if (cfg and cfg.get("cloudRemote")
@@ -2720,8 +3337,14 @@ def main():
                     print("启用: skillhome cloud remote set <remote>")
         elif cmd == "status":
             cmd_status()
+        elif cmd == "use":
+            cmd_use(args)
+        elif cmd == "context":
+            cmd_context(args)
         elif cmd == "list":
-            cmd_list()
+            cmd_list(args)
+        elif cmd == "search":
+            cmd_search(args)
         elif cmd == "link":
             if len(args) >= 2:
                 cmd_link(args[0], args[1])

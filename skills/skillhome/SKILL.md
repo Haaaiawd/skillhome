@@ -70,7 +70,11 @@ python ~/.skillhome/bin/skillhome.py <command>
 | `discover` | Re-scan home dir for skill dirs (run after installing new agent) |
 | `sync` | Migrate real dirs to central + repair missing links (incremental) |
 | `sync --full` | Rebuild all links (fix broken/stale links) |
-| `status` | Show central count, link count, per-agent breakdown |
+| `status` | Show central count, link count, per-agent breakdown, active project |
+| `use <project>` | Activate project context: link its skills into agent dirs, remove other projects' links |
+| `use` | Infer project from current directory (path segment vs scopeRules) |
+| `use --none` | Deactivate project context, keep only global skills |
+| `context` | Show active project + activated skills (`--ensure` repairs missing links) |
 | `list` | List all skills with source agents |
 | `link <skill> <agent>` | Create link from agent dir to central skill |
 | `unlink <skill> <agent>` | Remove link from agent dir (keeps central file) |
@@ -120,6 +124,24 @@ manually:
 python ~/.skillhome/bin/skillhome.py link docx--gemini devin
 python ~/.skillhome/bin/skillhome.py global some-skill off
 ```
+
+## Project context
+
+Project-scoped skills (`scope: project`) stay central-only until activated:
+
+- `use <project>` links that project's skills into all agent dirs and
+  removes other projects' links — global links are never touched. State is
+  recorded in `~/.skillhome/state.json` (`activeProject`,
+  `activatedSkills`, `activatedAt`, `pwd`), which is local-only and never
+  cloud-synced.
+- `use` with no argument infers the project from the current directory
+  (path segments matched against scopeRules project names).
+- `use --none` clears the context; `context` shows it; `context --ensure`
+  re-materializes missing links (agents can run it at session start).
+- `sync` (including `--full` and cloud fanout) preserves the active
+  context: active project links are re-created, other projects' links are
+  cleaned. `--include-project` skips cleanup since it explicitly fans out
+  every project skill.
 
 ## Discovery rules
 

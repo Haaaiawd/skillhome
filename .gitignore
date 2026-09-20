@@ -1,8 +1,10 @@
 # Runtime files — auto-generated, user-specific, or logs
 config.json
+state.json
 skillhome.log
 watcher.log
 backups/
+notifications/
 
 # Central skill repository — contains synced skills, not part of this tool
 # Exception: skills/skillhome/ is the skill definition, part of this repo
@@ -18,3 +20,4 @@ Desktop.ini
 .DS_Store
 backup/
 agent-prompts/
+bin/__pycache__/
